@@ -1,0 +1,49 @@
+ID,Title,Severity,Affected Files,Description,Repro Steps,Suggested Fix,Estimated Dev Time
+SEC-001,Hardcoded JWT Secret in Configuration,Critical,appsettings.json;appsettings.Development.json,"JWT signing key is hardcoded in configuration files, exposing tokens to anyone with repo access.",View appsettings.json lines 9-11,Move to environment variables or dotnet user-secrets,1h
+SEC-002,Weak Tenant Isolation - Nullable Query Filters,Critical,ApplicationDbContext.cs:60-207,"Tenant query filters are nullable and can be bypassed if _tenantProvider is null, allowing cross-tenant data access.",Instantiate DbContext without tenant provider,Enforce non-null tenant provider, add tenant validation in repositories,4h
+SEC-003,Missing Tenant Validation on Resource Access,Critical,EmployeesController.cs;DepartmentsController.cs;TenantsController.cs,Controllers don't verify tenant ownership before returning resources, allowing IDOR attacks,Request resource from another tenant via ID enumeration,Add tenant ownership checks in service layer,6h
+SEC-004,Overly Permissive CORS Policy,Critical,Program.cs:137-153,"CORS allows any method, any header, and credentials from localhost origins, enabling CSRF and credential theft.",Make cross-origin request from localhost:8080,Restrict methods, headers, remove wildcards,1h
+SEC-005,JWT Token Stored in localStorage (XSS Risk),Critical,api.ts:45;authStore.ts,Tokens stored in localStorage are accessible to XSS attacks,Inject script via XSS payload,Use httpOnly cookies or secure session storage,3h
+SEC-006,No Rate Limiting on Authentication,Critical,AuthController.cs,Login/registration endpoints lack rate limiting, enabling brute-force attacks,Send 1000 login requests,Add rate limiting middleware (AspNetCoreRateLimit),2h
+SEC-007,Weak Password Policy,Critical,Program.cs:75-82,Password requires only 6 chars, no special chars, enabling weak passwords,Create user with password 123456,Enforce 12+ chars, special chars, complexity,1h
+SEC-008,Missing Security Headers,Critical,Program.cs,No CSP, HSTS, X-Frame-Options, X-Content-Type-Options headers,Inspect HTTP response headers,Add security headers middleware,2h
+SEC-009,Tenant Resolution via Untrusted Headers,High,TenantResolutionMiddleware.cs:14-28,Tenant ID resolved from HTTP headers without validation, enabling tenant spoofing,Send X-Tenant-Id: other-tenant header,Validate tenant exists and user has access,4h
+SEC-010,Sensitive Data Logging (PII Leakage),High,AuthController.cs:39,44;Login.tsx:30-36,Email addresses logged in plaintext; frontend logs user data to console,Check application logs or browser console,Remove PII from logs, use structured logging,2h
+SEC-011,HTTPS Metadata Disabled in Production,High,Program.cs:98,"RequireHttpsMetadata = false allows non-HTTPS JWT validation, enabling MITM attacks",Intercept JWT on HTTP,Enable HTTPS requirement in production,1h
+SEC-012,Missing CSRF Protection,High,Program.cs,No anti-forgery token validation for state-changing operations,Submit POST from malicious site,Add CSRF tokens or SameSite cookies,3h
+SEC-013,Exception Details Exposed,High,ExceptionHandlingMiddleware.cs:35-41,Generic error responses don't leak details, but controllers may expose stack traces in dev,Trigger exception in production-like env,Ensure all exceptions sanitized,1h
+SEC-014,No Request Size Limits,High,Program.cs,Missing RequestSizeLimit or DisableRequestSizeLimit configuration,Send 1GB JSON payload,Configure request size limits,1h
+SEC-015,Development Endpoints Exposed,High,Program.cs:190-295,/api/dev/* endpoints available in development, could leak to production,Access /api/dev/reset-database,Guard with environment checks, remove from prod,1h
+SEC-016,Missing Input Sanitization,High,EmployeesController.cs:154;DepartmentsController.cs:86,User input not sanitized before logging/storage, enabling injection via logs,Submit payload with script tags,Sanitize inputs, use parameterized queries (already done),2h
+SEC-017,Refresh Token Stored in localStorage,High,api.ts:56,64,Refresh tokens stored alongside access tokens in localStorage,XSS attack steals refresh token,Move to httpOnly cookies,3h
+SEC-018,No Audit Logging,Medium,All controllers,No logging of sensitive operations (user creation, role changes, data deletion),Perform admin action, check logs,Add audit logging for sensitive operations,4h
+SEC-019,Missing Dependency Vulnerability Scanning,Medium,.csproj;package.json,No automated scanning for known vulnerabilities in NuGet/NPM packages,Check for CVEs in dependencies,Add OWASP Dependency-Check to CI,2h
+SEC-020,No Container Security Scanning,Medium,N/A (no Dockerfile),No containerization or container security scanning,N/A,Add Dockerfile and Trivy scanning,4h
+SEC-021,GenericRepository Lacks Tenant Scoping,Medium,GenericRepository.cs:19-27,GetAllAsync() and GetByIdAsync() don't explicitly enforce tenant filtering (relies on query filters),Call GetAllAsync() without tenant context,Add explicit tenant checks in repository methods,3h
+SEC-022,Missing Input Validation on Sort Parameters,Medium,EmployeesController.cs:62-63,Sort field and direction not validated, enabling potential injection,Submit sortBy=;DROP TABLE--,Whitelist allowed sort fields,1h
+SEC-023,No CI/CD Pipeline,Medium,.github/workflows/ (missing),No automated builds, tests, or security scans in CI/CD,N/A,Add GitHub Actions workflows,6h
+SEC-024,Missing Unit Tests for Security,Medium,SmallHR.Tests/,No tests for tenant isolation, authorization, or input validation,Run test suite,Add security-focused unit/integration tests,8h
+SEC-025,Code Duplication in Controllers,Low,EmployeesController.cs;DepartmentsController.cs;PositionsController.cs,Repetitive error handling and validation logic,Compare controller methods,Extract to base controller or service layer,4h
+SEC-026,Large Methods in Services,Low,DepartmentService.cs;EmployeeService.cs,Some service methods exceed 50 lines, violating SRP,Review method lengths,Split into smaller methods,3h
+SEC-027,Inconsistent Error Response Format,Low,All controllers,Error responses vary between controllers,Compare error responses,Standardize error response format,2h
+SEC-028,Missing XML Documentation,Low,All controllers; services,Public APIs lack XML documentation comments,Generate API docs,Add XML comments for public APIs,4h
+SEC-029,No Code Formatting Standards,Low,Entire codebase,No .editorconfig or dotnet format configuration,Check code style,Add .editorconfig, run dotnet format,1h
+SEC-030,Missing Static Analysis,Low,.csproj files,No Roslyn analyzers (SecurityCodeScan, StyleCop) configured,Build project,Add analyzers, treat warnings as errors,2h
+SEC-031,No Dependency Update Automation,Low,.csproj;package.json,Manual dependency updates, no Dependabot,Check for outdated packages,Configure Dependabot,1h
+SEC-032,Console.log in Production Code,Low,Login.tsx:30-36,Frontend logs sensitive data to console,Open browser console,Remove console.log statements,30m
+SEC-033,Missing Health Check Endpoints,Low,Program.cs,No health check endpoints for monitoring,N/A,Add health checks,1h
+SEC-034,No Request Correlation IDs,Low,Middleware/,Requests lack correlation IDs for tracing,Trace request across services,Add correlation ID middleware,2h
+SEC-035,Missing API Versioning,Low,All controllers,No API versioning strategy,N/A,Add API versioning,3h
+SEC-036,Inefficient Database Queries,Low,EmployeeService.cs;DepartmentService.cs,Some queries fetch more data than needed (N+1 queries),Profile database queries,Add eager loading, optimize queries,4h
+SEC-037,Missing Caching Strategy,Low,Services,No caching for frequently accessed data (departments, positions),Profile response times,Add caching for static/rarely-changing data,3h
+SEC-038,No Transaction Management,Low,GenericRepository.cs:39-43,Repository methods don't use transactions for multi-operation updates,Update related entities,Add transaction support,2h
+SEC-039,Missing Soft Delete Enforcement,Low,BaseEntity.cs:14,IsDeleted flag exists but not consistently used in queries,Query deleted entities,Enforce soft delete filtering,2h
+SEC-040,Missing Migration Rollback Strategy,Low,Migrations/,No documented rollback procedure for failed migrations,N/A,Document migration rollback,1h
+SEC-041,No Secret Scanning in CI,Low,.github/workflows/ (missing),No automated secret scanning (git-secrets, truffleHog),N/A,Add secret scanning to CI,1h
+SEC-042,Missing Code Complexity Metrics,Low,Entire codebase,No complexity analysis (cyclomatic complexity, maintainability index),N/A,Add complexity analysis to CI,1h
+SEC-043,No Duplication Detection,Low,Entire codebase,No copy-paste detection (CPD) in CI,N/A,Add duplication detection,1h
+SEC-044,Missing Performance Testing,Low,Test suite,No load/performance tests,N/A,Add performance test suite,6h
+SEC-045,Missing Integration Test Environment,Low,Test configuration,Tests may hit production-like database,N/A,Configure isolated test database,2h
+SEC-046,Missing Documentation for Security,Low,Documentation,No security best practices or threat model documented,N/A,Create security documentation,3h
+SEC-047,Missing Backup/Recovery Procedures,Low,Infrastructure,No documented backup and recovery procedures,N/A,Document backup/recovery,2h
+

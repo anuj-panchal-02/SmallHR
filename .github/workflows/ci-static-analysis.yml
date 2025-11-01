@@ -1,0 +1,88 @@
+name: CI - Static Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  dotnet-format:
+    name: Code Formatting Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Install dotnet-format
+        run: dotnet tool install -g dotnet-format
+      
+      - name: Run dotnet format (verify)
+        run: dotnet format --verify --verbosity diagnostic
+        working-directory: SmallHR.API
+      
+      - name: Run dotnet format (verify) - Infrastructure
+        run: dotnet format --verify --verbosity diagnostic
+        working-directory: SmallHR.Infrastructure
+      
+      - name: Run dotnet format (verify) - Core
+        run: dotnet format --verify --verbosity diagnostic
+        working-directory: SmallHR.Core
+
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+      
+      - name: Run tests
+        run: dotnet test --no-build --configuration Release --verbosity normal --collect:"XPlat Code Coverage" --results-directory:"${{ runner.temp }}/test-results"
+      
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: ${{ runner.temp }}/test-results/**/coverage.cobertura.xml
+          fail_ci_if_error: false
+
+  roslyn-analyzers:
+    name: Roslyn Analyzers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Restore dependencies
+        run: dotnet restore
+      
+      - name: Build with analyzers
+        run: dotnet build --no-restore --configuration Release /p:TreatWarningsAsErrors=false
+        continue-on-error: true
+      
+      - name: Check for analyzer warnings
+        run: |
+          WARNINGS=$(dotnet build --no-restore --configuration Release 2>&1 | grep -i "warning" | wc -l)
+          if [ $WARNINGS -gt 0 ]; then
+            echo "Found $WARNINGS analyzer warnings"
+            dotnet build --no-restore --configuration Release 2>&1 | grep -i "warning"
+            exit 1
+          fi
+

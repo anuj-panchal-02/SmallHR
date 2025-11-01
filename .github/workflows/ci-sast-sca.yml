@@ -1,0 +1,144 @@
+name: CI - SAST & SCA
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  schedule:
+    - cron: '0 0 * * 1' # Weekly on Monday
+
+jobs:
+  dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Install OWASP Dependency-Check
+        run: |
+          wget -q https://github.com/jeremylong/DependencyCheck/releases/download/v9.0.9/dependency-check-9.0.9-release.zip
+          unzip -q dependency-check-9.0.9-release.zip
+          echo "$(pwd)/dependency-check/bin" >> $GITHUB_PATH
+      
+      - name: Run Dependency-Check for .NET
+        run: |
+          dependency-check.sh --scan SmallHR.API --scan SmallHR.Infrastructure --scan SmallHR.Core \
+            --format HTML --format JSON --out reports/dotnet-dependency-check \
+            --enableExperimental --nvdApiKey ${{ secrets.NVD_API_KEY || '' }}
+        continue-on-error: true
+      
+      - name: Upload Dependency-Check Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dotnet-dependency-check-report
+          path: reports/dotnet-dependency-check
+      
+      - name: Check for critical vulnerabilities
+        run: |
+          if [ -f reports/dotnet-dependency-check/dependency-check-report.json ]; then
+            CRITICAL=$(jq '[.dependencies[] | select(.vulnerabilities[]?.severity == "CRITICAL" or .vulnerabilities[]?.severity == "HIGH")] | length' reports/dotnet-dependency-check/dependency-check-report.json)
+            if [ "$CRITICAL" -gt 0 ]; then
+              echo "Found $CRITICAL dependencies with critical/high vulnerabilities"
+              jq '[.dependencies[] | select(.vulnerabilities[]?.severity == "CRITICAL" or .vulnerabilities[]?.severity == "HIGH")]' reports/dotnet-dependency-check/dependency-check-report.json
+              exit 1
+            fi
+          fi
+
+  npm-audit:
+    name: NPM Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: SmallHR.Web/package-lock.json
+      
+      - name: Install dependencies
+        working-directory: SmallHR.Web
+        run: npm ci
+      
+      - name: Run npm audit
+        working-directory: SmallHR.Web
+        run: npm audit --audit-level=moderate
+      
+      - name: Generate audit report
+        working-directory: SmallHR.Web
+        run: npm audit --json > npm-audit-report.json || true
+      
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-report
+          path: SmallHR.Web/npm-audit-report.json
+
+  codeql-analysis:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+  dotnet-list-vulnerable:
+    name: DotNet List Vulnerable Packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      
+      - name: List vulnerable packages
+        run: |
+          dotnet list package --vulnerable --include-transitive --format json > vulnerable-packages.json || true
+      
+      - name: Check for vulnerable packages
+        run: |
+          if [ -f vulnerable-packages.json ]; then
+            VULNERABLE=$(jq '.projects[] | select(.frameworks[].topLevelPackages[]?.vulnerabilities != null) | length' vulnerable-packages.json)
+            if [ "$VULNERABLE" != "null" ] && [ "$VULNERABLE" != "0" ]; then
+              echo "Found vulnerable packages"
+              jq '.projects[] | select(.frameworks[].topLevelPackages[]?.vulnerabilities != null)' vulnerable-packages.json
+              exit 1
+            fi
+          fi
+      
+      - name: Upload vulnerable packages report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vulnerable-packages-report
+          path: vulnerable-packages.json
+
