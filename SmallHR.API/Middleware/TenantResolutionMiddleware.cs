@@ -1,46 +1,201 @@
+using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using SmallHR.Core.Interfaces;
+using SmallHR.API.Extensions;
 
 namespace SmallHR.API.Middleware;
 
+/// <summary>
+/// Tenant Resolution Middleware
+/// 
+/// Detects tenant context from multiple sources in priority order:
+/// 1. JWT Claims (TenantId or tenant claim) - when authenticated
+/// 2. Request subdomain (tenantname.yourapp.com)
+/// 3. X-Tenant-Id header
+/// 4. X-Tenant-Domain header
+/// 5. Default tenant ("default")
+/// 
+/// Enforces tenant boundary: If authenticated, JWT tenant claim must match resolved tenant.
+/// </summary>
 public class TenantResolutionMiddleware
 {
     private readonly RequestDelegate _next;
-    public TenantResolutionMiddleware(RequestDelegate next) { _next = next; }
+    
+    public TenantResolutionMiddleware(RequestDelegate next) 
+    { 
+        _next = next; 
+    }
 
     public async Task InvokeAsync(HttpContext context, ITenantProvider tenantProvider)
     {
-        // Resolve from header or host; fallback to default
-        var headerId = context.Request.Headers["X-Tenant-Id"].ToString();
-        var headerDomain = context.Request.Headers["X-Tenant-Domain"].ToString();
-        if (!string.IsNullOrWhiteSpace(headerId))
-        {
-            context.Items["TenantId"] = headerId;
-        }
-        else if (!string.IsNullOrWhiteSpace(headerDomain))
-        {
-            context.Items["TenantId"] = headerDomain.ToLowerInvariant();
-        }
-        else
-        {
-            context.Items["TenantId"] = "default";
-        }
+        var isAuthenticated = context.User?.Identity?.IsAuthenticated == true;
+        var isSuperAdmin = context.User?.IsInRole("SuperAdmin") == true;
+        var isImpersonating = context.User?.FindFirst("IsImpersonating")?.Value == "true";
 
-        // Enforce boundary if authenticated: tenant claim must match resolved TenantId
-        if (context.User?.Identity?.IsAuthenticated == true)
+        // Handle impersonation mode
+        // SuperAdmin with impersonation token acts as the impersonated tenant
+        if (isAuthenticated && isSuperAdmin && isImpersonating)
         {
-            var claimTenant = context.User.FindFirst("tenant")?.Value;
-            var resolvedTenant = context.Items["TenantId"] as string;
-            if (!string.IsNullOrWhiteSpace(claimTenant) && !string.Equals(claimTenant, resolvedTenant, StringComparison.Ordinal))
+            var impersonatedTenantId = context.User.FindFirst("TenantId")?.Value 
+                ?? context.User.FindFirst("tenant")?.Value;
+            
+            if (!string.IsNullOrWhiteSpace(impersonatedTenantId) && impersonatedTenantId != "platform")
             {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                await context.Response.WriteAsync("Tenant mismatch.");
+                context.Items["TenantId"] = impersonatedTenantId;
+                context.Items["IsSuperAdmin"] = true;
+                context.Items["IsImpersonating"] = true;
+                context.Items["OriginalUserId"] = context.User.FindFirst("OriginalUserId")?.Value;
+                context.Items["OriginalEmail"] = context.User.FindFirst("OriginalEmail")?.Value;
+                await _next(context);
                 return;
             }
         }
 
+        // SuperAdmin without impersonation - operates at platform layer
+        if (isSuperAdmin && !isImpersonating)
+        {
+            // SuperAdmin operates at platform layer - no tenant context
+            context.Items["TenantId"] = "platform"; // Special marker for SuperAdmin
+            context.Items["IsSuperAdmin"] = true;
+            await _next(context);
+            return;
+        }
+
+        string? resolvedTenantId = null;
+        string? source = null;
+
+        // Priority 1: JWT Claims (if authenticated) - Most authoritative
+        // Check both "TenantId" and "tenant" claims for compatibility
+        if (isAuthenticated)
+        {
+            var jwtTenant = context.User.FindFirst("TenantId")?.Value 
+                ?? context.User.FindFirst("tenant")?.Value;
+            
+            if (!string.IsNullOrWhiteSpace(jwtTenant) && jwtTenant != "platform")
+            {
+                resolvedTenantId = jwtTenant;
+                source = "JWT_CLAIM";
+            }
+        }
+
+        // Priority 2: Subdomain detection (tenantname.yourapp.com)
+        // Works for both authenticated and unauthenticated requests
+        if (string.IsNullOrWhiteSpace(resolvedTenantId))
+        {
+            var host = context.Request.Host.Host;
+            var subdomain = ExtractSubdomain(host);
+            
+            if (!string.IsNullOrWhiteSpace(subdomain))
+            {
+                resolvedTenantId = subdomain.ToLowerInvariant();
+                source = "SUBDOMAIN";
+            }
+        }
+
+        // Priority 3: X-Tenant-Id header
+        if (string.IsNullOrWhiteSpace(resolvedTenantId))
+        {
+            var headerId = context.Request.Headers["X-Tenant-Id"].ToString();
+            if (!string.IsNullOrWhiteSpace(headerId))
+            {
+                resolvedTenantId = headerId;
+                source = "HEADER_X_TENANT_ID";
+            }
+        }
+
+        // Priority 4: X-Tenant-Domain header
+        if (string.IsNullOrWhiteSpace(resolvedTenantId))
+        {
+            var headerDomain = context.Request.Headers["X-Tenant-Domain"].ToString();
+            if (!string.IsNullOrWhiteSpace(headerDomain))
+            {
+                resolvedTenantId = headerDomain.ToLowerInvariant();
+                source = "HEADER_X_TENANT_DOMAIN";
+            }
+        }
+
+        // Priority 5: Default fallback
+        if (string.IsNullOrWhiteSpace(resolvedTenantId))
+        {
+            resolvedTenantId = "default";
+            source = "DEFAULT";
+        }
+
+        // Enforce tenant boundary if authenticated
+        // JWT tenant claim must match resolved tenant ID to prevent cross-tenant access
+        if (isAuthenticated && source != "JWT_CLAIM")
+        {
+            var jwtTenant = context.User.FindFirst("TenantId")?.Value 
+                ?? context.User.FindFirst("tenant")?.Value;
+            
+            // If JWT has a tenant claim, it must match the resolved tenant
+            // This prevents users from accessing data from a different tenant
+            if (!string.IsNullOrWhiteSpace(jwtTenant) && 
+                !string.Equals(jwtTenant, resolvedTenantId, StringComparison.OrdinalIgnoreCase))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                await context.Response.WriteAsync(
+                    $"Tenant mismatch. JWT tenant: '{jwtTenant}', Resolved tenant: '{resolvedTenantId}'. " +
+                    "Your authentication token is tied to a different tenant.");
+                return;
+            }
+            
+            // If JWT has tenant claim and we resolved from another source, use JWT (most authoritative)
+            if (!string.IsNullOrWhiteSpace(jwtTenant))
+            {
+                resolvedTenantId = jwtTenant;
+                source = "JWT_CLAIM";
+            }
+        }
+
+        // Store resolved tenant ID in context for use by ITenantProvider
+        context.Items["TenantId"] = resolvedTenantId;
+
         await _next(context);
+    }
+
+    /// <summary>
+    /// Extracts subdomain from hostname.
+    /// Examples:
+    /// - "tenantname.yourapp.com" -> "tenantname"
+    /// - "acme.localhost" -> "acme"
+    /// - "yourapp.com" -> null (no subdomain)
+    /// </summary>
+    private static string? ExtractSubdomain(string host)
+    {
+        if (string.IsNullOrWhiteSpace(host))
+            return null;
+
+        // Handle localhost for development
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.StartsWith("localhost:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        // Split by dots
+        var parts = host.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        
+        // Need at least 2 parts for a subdomain (subdomain.domain or subdomain.domain.tld)
+        if (parts.Length < 2)
+            return null;
+
+        // For "tenantname.yourapp.com", the first part is the subdomain
+        // For "tenantname.localhost", the first part is also the subdomain
+        var subdomain = parts[0].Trim().ToLowerInvariant();
+
+        // Exclude common non-tenant subdomains
+        var excludedSubdomains = new[] { "www", "api", "app", "admin", "www" };
+        if (excludedSubdomains.Contains(subdomain))
+            return null;
+
+        // Validate subdomain format (alphanumeric and hyphens only)
+        if (!System.Text.RegularExpressions.Regex.IsMatch(subdomain, @"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"))
+            return null;
+
+        return subdomain;
     }
 }
 

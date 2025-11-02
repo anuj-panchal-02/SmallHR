@@ -24,5 +24,6 @@ public interface IEmployeeRepository : IGenericRepository<Employee>
         int pageNumber = 1,
         int pageSize = 10,
         string? sortBy = "FirstName",
-        string? sortDirection = "asc");
+        string? sortDirection = "asc",
+        string? tenantId = null);
 }

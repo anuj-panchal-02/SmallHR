@@ -14,6 +14,7 @@ import {
   SafetyOutlined,
   CaretDownOutlined,
   CaretRightOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '../../store/authStore';
 import { useRolePermissions } from '../../hooks/useRolePermissions';
@@ -41,12 +42,13 @@ interface SidebarProps {
 export default function Sidebar({ collapsed }: SidebarProps) {
   const navigate = useNavigate();
   const location = useLocation();
-  const { logout } = useAuthStore();
+  const { logout, user } = useAuthStore();
   const { canAccessPage } = useRolePermissions();
   const [activeKey, setActiveKey] = useState(location.pathname);
   const [expandedKeys, setExpandedKeys] = useState<Set<string>>(new Set());
 
   const { modules, loading, refresh } = useModulesStore();
+  const isSuperAdmin = user?.roles?.[0] === 'SuperAdmin';
 
   useEffect(() => {
     refresh();
@@ -63,6 +65,7 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     if (p.includes('payroll') || p.includes('expense')) return <DollarOutlined />;
     if (p.includes('notice') || p.includes('report')) return <BarChartOutlined />;
     if (p.includes('permission') || p.includes('role')) return <SafetyOutlined />;
+    if (p.includes('tenant')) return <ApartmentOutlined />;
     return <BellOutlined />;
   };
 
@@ -111,7 +114,123 @@ export default function Sidebar({ collapsed }: SidebarProps) {
     });
   };
 
-  const menuSections: MenuSection[] = flattenToSections(modules);
+  // Add SuperAdmin-specific menu items
+  const getSuperAdminMenuItems = (): MenuItem[] => {
+    if (!isSuperAdmin) return [];
+    
+    const items: MenuItem[] = [];
+    
+    // SuperAdmin always has access to admin endpoints, but check permissions for consistency
+    if (canAccessPage('/admin/dashboard')) {
+      items.push({
+        key: '/admin/dashboard',
+        icon: <DashboardOutlined />,
+        label: 'SuperAdmin Dashboard',
+        path: '/admin/dashboard',
+      });
+    }
+    
+    if (canAccessPage('/admin/tenants')) {
+      items.push({
+        key: '/admin/tenants',
+        icon: <ApartmentOutlined />,
+        label: 'Tenants',
+        path: '/admin/tenants',
+      });
+    }
+    
+    if (canAccessPage('/admin/billing')) {
+      items.push({
+        key: '/admin/billing',
+        icon: <DollarOutlined />,
+        label: 'Billing Center',
+        path: '/admin/billing',
+      });
+    }
+    
+    if (canAccessPage('/admin/alerts')) {
+      items.push({
+        key: '/admin/alerts',
+        icon: <BellOutlined />,
+        label: 'Alerts Hub',
+        path: '/admin/alerts',
+      });
+    }
+    
+    if (canAccessPage('/role-permissions')) {
+      items.push({
+        key: '/role-permissions',
+        icon: <SafetyOutlined />,
+        label: 'Role Permissions',
+        path: '/role-permissions',
+      });
+    }
+    
+    return items;
+  };
+
+  // Add Admin-specific menu items based on permissions
+  const getAdminMenuItems = (): MenuItem[] => {
+    const isAdmin = user?.roles?.[0] === 'Admin';
+    if (!isAdmin) return [];
+    
+    const items: MenuItem[] = [];
+    
+    // Only add Role Permissions if Admin has permission to access it
+    if (canAccessPage('/role-permissions')) {
+      items.push({
+        key: '/role-permissions',
+        icon: <SafetyOutlined />,
+        label: 'Role Permissions',
+        path: '/role-permissions',
+      });
+    }
+    
+    return items;
+  };
+
+  // Use modules from database (built from permissions)
+  // SuperAdmin will get all pages from database, no fallback needed
+  // Tenant Admin will get pages based on their initialized permissions
+  const modulesToUse = modules;
+
+  const regularMenuSections: MenuSection[] = flattenToSections(modulesToUse);
+  
+  // Add SuperAdmin section if user is SuperAdmin
+  const superAdminMenuItems = getSuperAdminMenuItems();
+  const adminMenuItems = getAdminMenuItems();
+  let menuSections: MenuSection[] = regularMenuSections;
+  
+  if (isSuperAdmin && superAdminMenuItems.length > 0) {
+    // Add SuperAdmin section at the beginning
+    menuSections = [
+      {
+        title: 'Administration',
+        items: superAdminMenuItems,
+        hasChildren: false,
+      },
+      ...regularMenuSections,
+    ];
+  } else if (adminMenuItems.length > 0) {
+    // Add Admin-specific menu items (e.g., Role Permissions)
+    // Check if "Settings" section already exists in regularMenuSections
+    const hasSettingsSection = regularMenuSections.some(s => 
+      s.title.toLowerCase() === 'settings' || 
+      s.items.some(i => i.path === '/settings')
+    );
+    
+    // Use "Administration" title if Settings section already exists to avoid duplicates
+    const adminSectionTitle = hasSettingsSection ? 'Administration' : 'Settings';
+    
+    menuSections = [
+      {
+        title: adminSectionTitle,
+        items: adminMenuItems,
+        hasChildren: false,
+      },
+      ...regularMenuSections,
+    ];
+  }
 
   const handleMenuClick = (path: string) => {
     setActiveKey(path);
@@ -199,8 +318,11 @@ export default function Sidebar({ collapsed }: SidebarProps) {
           // Don't render section if no accessible items (filtered in flattenToSections)
           if (section.items.length === 0) return null;
 
+          // Use unique key combining section title and index to avoid duplicates
+          const uniqueKey = `${section.title}-${sectionIndex}`;
+
           return (
-          <div key={section.title} style={{ marginBottom: collapsed ? 8 : 12 }}>
+          <div key={uniqueKey} style={{ marginBottom: collapsed ? 8 : 12 }}>
             {!collapsed && (
               <div style={{ marginBottom: 8, paddingLeft: 12 }}>
                 <span
@@ -228,13 +350,16 @@ export default function Sidebar({ collapsed }: SidebarProps) {
               />
             )}
 
-            {section.items.map((item) => {
+            {section.items.map((item, itemIndex) => {
               const isActive = activeKey === item.key;
               const isExpanded = expandedKeys.has(item.key);
               const hasChildren = item.children && item.children.length > 0;
               
+              // Use unique key combining item key and index to avoid duplicates across sections
+              const uniqueItemKey = `${item.key}-${sectionIndex}-${itemIndex}`;
+              
               const menuItemContent = (
-                <div key={item.key}>
+                <div key={uniqueItemKey}>
                   {/* Parent item */}
                   <div
                     onClick={(e) => {
@@ -302,11 +427,13 @@ export default function Sidebar({ collapsed }: SidebarProps) {
                   {/* Children items */}
                   {hasChildren && !collapsed && isExpanded && item.children && (
                     <div style={{ marginLeft: 12, marginTop: 2 }}>
-                      {item.children.map((child) => {
+                      {item.children.map((child, childIndex) => {
                         const childIsActive = activeKey === child.key;
+                        // Use unique key for children to avoid duplicates
+                        const uniqueChildKey = `${child.key}-${sectionIndex}-${itemIndex}-${childIndex}`;
                         return (
                           <div
-                            key={child.key}
+                            key={uniqueChildKey}
                             onClick={() => handleMenuClick(child.path)}
                             style={{
                               display: 'flex',

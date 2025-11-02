@@ -7,6 +7,7 @@ import MainLayout from './components/Layout/MainLayout';
 import Login from './pages/Login';
 import ForgotPassword from './pages/ForgotPassword';
 import ResetPassword from './pages/ResetPassword';
+import SetupPassword from './pages/SetupPassword';
 import VerifyEmail from './pages/VerifyEmail';
 import SuperAdminDashboard from './pages/SuperAdminDashboard';
 import AdminDashboard from './pages/AdminDashboard';
@@ -16,6 +17,11 @@ import RolePermissions from './pages/RolePermissions';
 import Employees from './pages/Employees';
 import Departments from './pages/Departments';
 import Positions from './pages/Positions';
+import TenantSettings from './pages/TenantSettings';
+import TenantsList from './pages/TenantsList';
+import TenantDetail from './pages/TenantDetail';
+import BillingCenter from './pages/BillingCenter';
+import AlertsHub from './pages/AlertsHub';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import './App.css';
 import { buildSemanticColors, buildSemanticColorsDark, applyCssVariables, getAntThemeFromSemantic, getStoredPaletteOrDefault, registerGlobalPaletteAPI } from './theme';
@@ -78,12 +84,23 @@ function AppShell() {
     if (path === '/employees') return <Employees />;
     if (path === '/departments') return <Departments />;
     if (path === '/positions') return <Positions />;
-    if (path === '/organization') return <UnknownModule />;
-    if (path === '/department') return <UnknownModule />;
+    if (path === '/organization') {
+      // Organization is a parent, default to Departments
+      return <Departments />;
+    }
+    if (path === '/tenant-settings') return <TenantSettings />;
+    if (path === '/admin/tenants') return <TenantsList />;
+    if (path === '/admin/tenants/:id') return <TenantDetail />;
+    if (path === '/admin/billing') return <BillingCenter />;
+    if (path === '/admin/alerts') return <AlertsHub />;
+    // Payroll pages
+    if (path === '/payroll/reports') return <UnknownModule />;
+    if (path === '/payroll/settings') return <UnknownModule />;
+    if (path === '/payroll') return <UnknownModule />;
+    // Other pages
     if (path === '/calendar') return <UnknownModule />;
     if (path === '/notice-board') return <UnknownModule />;
     if (path === '/expenses') return <UnknownModule />;
-    if (path === '/payroll' || path === '/payroll/reports' || path === '/payroll/settings') return <UnknownModule />;
     if (path === '/settings') return <UnknownModule />;
     return <UnknownModule />;
   };
@@ -121,6 +138,7 @@ function AppShell() {
               <Route path="/login" element={<Login />} />
               <Route path="/forgot-password" element={<ForgotPassword />} />
               <Route path="/reset-password" element={<ResetPassword />} />
+              <Route path="/setup-password" element={<SetupPassword />} />
               <Route path="/verify-email" element={<VerifyEmail />} />
               {/* Static dashboard route - always available */}
               <Route
@@ -130,6 +148,70 @@ function AppShell() {
                     <ProtectedRoute requiredPath="/dashboard">
                       <MainLayout>
                         <DashboardRouter />
+                      </MainLayout>
+                    </ProtectedRoute>
+                  </AuthRoute>
+                }
+              />
+              {/* Admin routes - SuperAdmin only */}
+              <Route
+                path="/admin/dashboard"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <SuperAdminDashboard />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
+              <Route
+                path="/admin/tenants"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <TenantsList />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
+              <Route
+                path="/admin/tenants/:id"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <TenantDetail />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
+              <Route
+                path="/admin/billing"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <BillingCenter />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
+              <Route
+                path="/admin/alerts"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <AlertsHub />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
+              {/* Static route for Role Permissions */}
+              <Route
+                path="/role-permissions"
+                element={
+                  <AuthRoute>
+                    <ProtectedRoute requiredPath="/role-permissions">
+                      <MainLayout>
+                        <RolePermissions />
                       </MainLayout>
                     </ProtectedRoute>
                   </AuthRoute>

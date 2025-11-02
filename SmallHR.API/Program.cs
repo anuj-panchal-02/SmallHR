@@ -58,6 +58,7 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 // Database configuration with connection resolver (supports future db-per-tenant)
+// Note: ApplicationDbContext uses IServiceProvider to get HttpContextAccessor for SuperAdmin detection
 builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
 {
     var resolver = sp.GetRequiredService<IConnectionResolver>();
@@ -68,6 +69,7 @@ builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
     }
     var conn = resolver.GetConnectionString(tenantProvider.TenantId);
     options.UseSqlServer(conn);
+    // IServiceProvider is injected via constructor to get HttpContextAccessor for SuperAdmin detection
 }, ServiceLifetime.Scoped);
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantProvider, HttpContextTenantProvider>();
@@ -75,6 +77,8 @@ builder.Services.AddScoped<IConnectionResolver, ConnectionResolver>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<ITenantCache, TenantMemoryCache>();
 builder.Services.AddHostedService<SmallHR.API.HostedServices.ModulesWarmupHostedService>();
+builder.Services.AddHostedService<SmallHR.API.HostedServices.TenantProvisioningHostedService>();
+builder.Services.AddHostedService<SmallHR.API.HostedServices.TenantLifecycleMonitoringHostedService>();
 
 // Identity configuration
 builder.Services.AddIdentity<User, IdentityRole>(options =>
@@ -164,6 +168,15 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IDepartmentService, DepartmentService>();
 builder.Services.AddScoped<IPositionService, PositionService>();
 builder.Services.AddScoped<IEmailService, ConsoleEmailService>(); // Email service - replace with SMTP/SendGrid in production
+builder.Services.AddScoped<ITenantProvisioningService, TenantProvisioningService>();
+builder.Services.AddScoped<ISubscriptionService, SmallHR.Infrastructure.Services.SubscriptionService>();
+builder.Services.AddScoped<IUsageMetricsService, SmallHR.Infrastructure.Services.UsageMetricsService>();
+builder.Services.AddScoped<ITenantLifecycleService, SmallHR.Infrastructure.Services.TenantLifecycleService>();
+builder.Services.AddScoped<IAdminAuditService, SmallHR.Infrastructure.Services.AdminAuditService>();
+builder.Services.AddScoped<IAlertService, SmallHR.Infrastructure.Services.AlertService>();
+
+// Webhook handlers
+builder.Services.AddScoped<StripeWebhookHandler>();
 
 // Authorization: Permission-based
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
@@ -233,7 +246,17 @@ if (!app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseMiddleware<TenantResolutionMiddleware>();
+
+// SuperAdmin query filter bypass (must be before feature access middleware)
+app.UseMiddleware<SuperAdminQueryFilterBypassMiddleware>();
+
+// Feature access middleware (checks subscription status and active features)
+app.UseMiddleware<FeatureAccessMiddleware>();
+
 app.UseAuthorization();
+
+// Admin audit middleware (must be after authorization to access user claims)
+app.UseMiddleware<AdminAuditMiddleware>();
 
 app.MapControllers();
 
@@ -385,8 +408,8 @@ if (app.Environment.IsDevelopment())
         }
     });
     
-    // Full database reset (drops and recreates database)
-    app.MapPost("/api/dev/reset-database", async (ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager) =>
+    // Full database reset (drops and recreates database, keeps only 1 SuperAdmin)
+    app.MapPost("/api/dev/reset-database", async (ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger<Program> logger) =>
     {
         try
         {
@@ -394,14 +417,127 @@ if (app.Environment.IsDevelopment())
             await context.Database.EnsureDeletedAsync();
             await context.Database.EnsureCreatedAsync();
             
-            // Re-seed with clean data (roles + SuperAdmin only)
-            await SeedDataAsync(context, userManager, roleManager);
+            // Apply all migrations
+            await context.Database.MigrateAsync();
             
-            return Results.Ok(new { message = "Database reset and re-seeded successfully (fresh SaaS setup)" });
+            // Re-seed with clean data (roles + 1 SuperAdmin only)
+            await SeedDataAsync(context, userManager, roleManager, logger);
+            
+            return Results.Ok(new { 
+                message = "Database reset and re-seeded successfully. Only 1 SuperAdmin user exists.",
+                superAdminEmail = "superadmin@smallhr.com",
+                superAdminPassword = "SuperAdmin@123"
+            });
         }
         catch (Exception ex)
         {
             return Results.Problem($"Error resetting database: {ex.Message}");
+        }
+    });
+    
+    // Clean all data but keep roles and 1 SuperAdmin (without dropping database)
+    app.MapPost("/api/dev/clean-all-data", async (ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger<Program> logger) =>
+    {
+        try
+        {
+            // Delete all tenant-related data in reverse order of dependencies
+            logger.LogInformation("Starting cleanup of all tenant data...");
+            
+            // Helper function to safely delete from DbSet if table exists
+            // Uses raw SQL to bypass all EF Core query filters and ensure ALL records are deleted
+            async Task<int> SafeDeleteAsync<T>(DbSet<T> dbSet, string tableName) where T : class
+            {
+                try
+                {
+                    // First, get the actual table name from EF Core metadata
+                    var entityType = context.Model.FindEntityType(typeof(T));
+                    if (entityType == null)
+                    {
+                        logger.LogWarning("Entity type not found for {TableName}. Skipping.", tableName);
+                        return 0;
+                    }
+                    
+                    var sqlTableName = entityType.GetTableName() ?? entityType.GetDefaultTableName() ?? tableName;
+                    
+                    // Get count using raw SQL (bypasses all query filters)
+                    var connection = context.Database.GetDbConnection();
+                    await connection.OpenAsync();
+                    int count = 0;
+                    try
+                    {
+                        using var countCommand = connection.CreateCommand();
+                        countCommand.CommandText = $"SELECT COUNT(*) FROM [{sqlTableName}]";
+                        var countResult = await countCommand.ExecuteScalarAsync();
+                        count = countResult != null ? Convert.ToInt32(countResult) : 0;
+                    }
+                    finally
+                    {
+                        await connection.CloseAsync();
+                    }
+                    
+                    if (count > 0)
+                    {
+                        // Use raw SQL DELETE to ensure ALL records are removed (bypasses query filters)
+                        await context.Database.ExecuteSqlRawAsync($"DELETE FROM [{sqlTableName}]");
+                        logger.LogInformation("Deleted {Count} records from {TableName} using raw SQL", count, sqlTableName);
+                    }
+                    return count;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Table {TableName} may not exist yet or is empty. Skipping.", tableName);
+                    return 0;
+                }
+            }
+            
+            // Delete tenant-related entities first (child tables)
+            var alertsDeleted = await SafeDeleteAsync(context.Alerts, "Alerts");
+            var webhookEventsDeleted = await SafeDeleteAsync(context.WebhookEvents, "WebhookEvents");
+            var adminAuditsDeleted = await SafeDeleteAsync(context.AdminAudits, "AdminAudits");
+            
+            var lifecycleEventsDeleted = await SafeDeleteAsync(context.TenantLifecycleEvents, "TenantLifecycleEvents");
+            var usageMetricsDeleted = await SafeDeleteAsync(context.TenantUsageMetrics, "TenantUsageMetrics");
+            var subscriptionPlanFeaturesDeleted = await SafeDeleteAsync(context.SubscriptionPlanFeatures, "SubscriptionPlanFeatures");
+            var subscriptionsDeleted = await SafeDeleteAsync(context.Subscriptions, "Subscriptions");
+            var rolePermissionsDeleted = await SafeDeleteAsync(context.RolePermissions, "RolePermissions");
+            var modulesDeleted = await SafeDeleteAsync(context.Modules, "Modules");
+            var positionsDeleted = await SafeDeleteAsync(context.Positions, "Positions");
+            var departmentsDeleted = await SafeDeleteAsync(context.Departments, "Departments");
+            var attendancesDeleted = await SafeDeleteAsync(context.Attendances, "Attendances");
+            var leaveRequestsDeleted = await SafeDeleteAsync(context.LeaveRequests, "LeaveRequests");
+            var employeesDeleted = await SafeDeleteAsync(context.Employees, "Employees");
+            
+            // Delete tenants last (parent table)
+            var tenantsDeleted = await SafeDeleteAsync(context.Tenants, "Tenants");
+            
+            await context.SaveChangesAsync();
+            
+            logger.LogInformation("Deleted tenant data: Tenants={Tenants}, Employees={Employees}, LeaveRequests={LeaveRequests}, Attendances={Attendances}, Alerts={Alerts}, WebhookEvents={WebhookEvents}",
+                tenantsDeleted, employeesDeleted, leaveRequestsDeleted, attendancesDeleted, alertsDeleted, webhookEventsDeleted);
+            
+            // Delete all users except SuperAdmin
+            var superAdminEmail = "superadmin@smallhr.com";
+            var allUsers = userManager.Users.ToList();
+            foreach (var user in allUsers)
+            {
+                if (user.Email == null || !user.Email.Equals(superAdminEmail, StringComparison.OrdinalIgnoreCase))
+                {
+                    await userManager.DeleteAsync(user);
+                }
+            }
+            
+            // Ensure only 1 SuperAdmin exists
+            await SeedDataAsync(context, userManager, roleManager, logger);
+            
+            return Results.Ok(new { 
+                message = "All data cleaned successfully. Only 1 SuperAdmin user and roles remain.",
+                superAdminEmail = "superadmin@smallhr.com",
+                superAdminPassword = "SuperAdmin@123"
+            });
+        }
+        catch (Exception ex)
+        {
+            return Results.Problem($"Error cleaning data: {ex.Message}");
         }
     });
 }
@@ -415,8 +551,9 @@ using (var scope = app.Services.CreateScope())
         var context = services.GetRequiredService<ApplicationDbContext>();
         var userManager = services.GetRequiredService<UserManager<User>>();
         var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
+        var logger = services.GetRequiredService<ILogger<Program>>();
         
-        await SeedDataAsync(context, userManager, roleManager);
+        await SeedDataAsync(context, userManager, roleManager, logger);
     }
     catch (Exception ex)
     {
@@ -427,8 +564,8 @@ using (var scope = app.Services.CreateScope())
 
 app.Run();
 
-// Seed data method - Fresh SaaS setup
-static async Task SeedDataAsync(ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager)
+// Seed data method - Minimal setup: Only roles and 1 SuperAdmin
+static async Task SeedDataAsync(ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger logger)
 {
     // Create roles only - essential for the system
     if (!await roleManager.RoleExistsAsync("SuperAdmin"))
@@ -451,8 +588,37 @@ static async Task SeedDataAsync(ApplicationDbContext context, UserManager<User> 
         await roleManager.CreateAsync(new IdentityRole("Employee"));
     }
 
-    // Create SuperAdmin user for initial setup (always created)
+    // Delete all existing users except SuperAdmin (to ensure only 1 SuperAdmin exists)
     var superAdminEmail = "superadmin@smallhr.com";
+    var allUsers = userManager.Users.ToList();
+    foreach (var user in allUsers)
+    {
+        if (user.Email == null || !user.Email.Equals(superAdminEmail, StringComparison.OrdinalIgnoreCase))
+        {
+            await userManager.DeleteAsync(user);
+            logger.LogInformation("Deleted user: {Email}", user.Email);
+        }
+    }
+
+    // Delete duplicate SuperAdmin users (keep only one)
+    var allSuperAdmins = await userManager.GetUsersInRoleAsync("SuperAdmin");
+    if (allSuperAdmins.Count > 1)
+    {
+        // Keep the first one, delete the rest
+        var superAdminToKeep = allSuperAdmins.FirstOrDefault(u => u.Email != null && u.Email.Equals(superAdminEmail, StringComparison.OrdinalIgnoreCase))
+            ?? allSuperAdmins.First();
+        
+        foreach (var admin in allSuperAdmins)
+        {
+            if (admin.Id != superAdminToKeep.Id)
+            {
+                await userManager.DeleteAsync(admin);
+                logger.LogInformation("Deleted duplicate SuperAdmin: {Email}", admin.Email);
+            }
+        }
+    }
+
+    // Create or update SuperAdmin user (ensure only 1 exists)
     var superAdminUser = await userManager.FindByEmailAsync(superAdminEmail);
     if (superAdminUser == null)
     {
@@ -463,257 +629,31 @@ static async Task SeedDataAsync(ApplicationDbContext context, UserManager<User> 
             FirstName = "Super",
             LastName = "Admin",
             DateOfBirth = new DateTime(1985, 1, 1),
-            IsActive = true
+            IsActive = true,
+            TenantId = null // SuperAdmin operates at platform layer, no tenant association
         };
         
         await userManager.CreateAsync(superAdminUser, "SuperAdmin@123");
         await userManager.AddToRoleAsync(superAdminUser, "SuperAdmin");
-    }
-
-    // Development only: Create demo users for all roles
-    // This helps with testing and development without manual user creation
-    // These users are only created in Development environment
-    // Production deployments should create users through the UI/API after setup
-    var isDevelopment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Development";
-    if (isDevelopment)
-    {
-        await SeedDemoUsersForAllRolesAsync(userManager);
-    }
-
-    // Seed departments and positions (essential for employee management)
-    const string defaultTenantId = "default";
-    
-    // Seed Modules - Organization master module with Departments and Positions as children
-    var organizationModule = await context.Modules
-        .FirstOrDefaultAsync(m => m.Path == "/organization" && m.TenantId == defaultTenantId);
-    
-    if (organizationModule == null)
-    {
-        organizationModule = new Module
-        {
-            TenantId = defaultTenantId,
-            Name = "Organization",
-            Path = "/organization",
-            ParentPath = null,
-            Icon = "ApartmentOutlined",
-            DisplayOrder = 3,
-            Description = "Organization structure management",
-            IsActive = true
-        };
-        await context.Modules.AddAsync(organizationModule);
-        await context.SaveChangesAsync();
+        logger.LogInformation("Created SuperAdmin user: {Email}", superAdminEmail);
     }
     else
     {
-        // Update DisplayOrder if it was changed
-        if (organizationModule.DisplayOrder != 3)
+        // Ensure existing SuperAdmin has TenantId = null and correct role
+        if (superAdminUser.TenantId != null)
         {
-            organizationModule.DisplayOrder = 3;
-            await context.SaveChangesAsync();
+            superAdminUser.TenantId = null;
+            await userManager.UpdateAsync(superAdminUser);
+            logger.LogInformation("Updated existing SuperAdmin user to have TenantId = null");
         }
-    }
-    
-    // Departments module
-    var departmentsModule = await context.Modules
-        .FirstOrDefaultAsync(m => m.Path == "/departments" && m.TenantId == defaultTenantId);
-    
-    if (departmentsModule == null)
-    {
-        departmentsModule = new Module
-        {
-            TenantId = defaultTenantId,
-            Name = "Departments",
-            Path = "/departments",
-            ParentPath = "/organization",
-            Icon = "TeamOutlined",
-            DisplayOrder = 1,
-            Description = "Manage departments and organizational units",
-            IsActive = true
-        };
-        await context.Modules.AddAsync(departmentsModule);
-        await context.SaveChangesAsync();
-    }
-    
-    // Positions module
-    var positionsModule = await context.Modules
-        .FirstOrDefaultAsync(m => m.Path == "/positions" && m.TenantId == defaultTenantId);
-    
-    if (positionsModule == null)
-    {
-        positionsModule = new Module
-        {
-            TenantId = defaultTenantId,
-            Name = "Positions",
-            Path = "/positions",
-            ParentPath = "/organization",
-            Icon = "UserOutlined",
-            DisplayOrder = 2,
-            Description = "Manage job positions and titles",
-            IsActive = true
-        };
-        await context.Modules.AddAsync(positionsModule);
-        await context.SaveChangesAsync();
-    }
-    
-    // Seed Departments
-    var departmentNames = new[] { "People/HR", "Engineering", "Sales", "Finance", "Customer Support", "Operations" };
-    var departments = new Dictionary<string, Department>();
-    
-    foreach (var deptName in departmentNames)
-    {
-        var existingDept = await context.Departments
-            .FirstOrDefaultAsync(d => d.Name == deptName && d.TenantId == defaultTenantId);
         
-        if (existingDept == null)
+        // Ensure SuperAdmin role is assigned
+        if (!await userManager.IsInRoleAsync(superAdminUser, "SuperAdmin"))
         {
-            var department = new Department
-            {
-                TenantId = defaultTenantId,
-                Name = deptName,
-                Description = $"{deptName} department",
-                IsActive = true
-            };
-            await context.Departments.AddAsync(department);
-            await context.SaveChangesAsync();
-            departments[deptName] = department;
-        }
-        else
-        {
-            departments[deptName] = existingDept;
+            await userManager.AddToRoleAsync(superAdminUser, "SuperAdmin");
+            logger.LogInformation("Assigned SuperAdmin role to existing user: {Email}", superAdminEmail);
         }
     }
-    
-    // Seed Positions
-    var positions = new List<(string Title, string? DepartmentName)>
-    {
-        ("Employee", null), // Base position - can be in any department
-        ("Manager", null), // Manager position - can be in any department
-        ("HR Admin", "People/HR"),
-        ("Finance Admin", "Finance"),
-        ("Support Agent", "Customer Support"),
-        ("Engineering — Senior", "Engineering"),
-        ("Engineering — Junior", "Engineering"),
-        // Additional important positions
-        ("Sales Representative", "Sales"),
-        ("Sales Manager", "Sales"),
-        ("Operations Manager", "Operations"),
-        ("Operations Coordinator", "Operations"),
-        ("HR Manager", "People/HR"),
-        ("Finance Manager", "Finance"),
-        ("Support Manager", "Customer Support"),
-        ("Engineering Manager", "Engineering"),
-        ("Senior Engineer", "Engineering"),
-        ("Junior Engineer", "Engineering"),
-        ("Lead Engineer", "Engineering")
-    };
-    
-    foreach (var (title, deptName) in positions)
-    {
-        var existingPos = await context.Positions
-            .FirstOrDefaultAsync(p => p.Title == title && p.TenantId == defaultTenantId);
-        
-        if (existingPos == null)
-        {
-            var position = new Position
-            {
-                TenantId = defaultTenantId,
-                Title = title,
-                DepartmentId = deptName != null && departments.ContainsKey(deptName) 
-                    ? departments[deptName].Id 
-                    : null,
-                Description = $"Position: {title}",
-                IsActive = true
-            };
-            await context.Positions.AddAsync(position);
-        }
-    }
-    
-    await context.SaveChangesAsync();
-    
-    // Seed Role Permissions for new pages (departments, positions, organization)
-    var newPages = new[]
-    {
-        new { Path = "/departments", Name = "Departments", Description = "Manage departments and organizational units" },
-        new { Path = "/positions", Name = "Positions", Description = "Manage job positions and titles" },
-        new { Path = "/organization", Name = "Organization", Description = "Organization structure management" }
-    };
-    
-    var roles = new[] { "SuperAdmin", "Admin", "HR", "Employee" };
-    
-    foreach (var role in roles)
-    {
-        foreach (var page in newPages)
-        {
-            // Check if permission already exists
-            var existingPermission = await context.RolePermissions
-                .FirstOrDefaultAsync(p => p.RoleName == role && p.PagePath == page.Path && p.TenantId == defaultTenantId);
-            
-            if (existingPermission == null)
-            {
-                // Determine permissions based on role
-                bool canAccess = false;
-                bool canView = false;
-                bool canCreate = false;
-                bool canEdit = false;
-                bool canDelete = false;
-                
-                // SuperAdmin: full access everywhere
-                if (role == "SuperAdmin")
-                {
-                    canAccess = true;
-                    canView = true;
-                    canCreate = true;
-                    canEdit = true;
-                    canDelete = true;
-                }
-                // Admin: full access to organization management
-                else if (role == "Admin")
-                {
-                    canAccess = true;
-                    canView = true;
-                    canCreate = true;
-                    canEdit = true;
-                    canDelete = true;
-                }
-                // HR: view and edit access to organization structure
-                else if (role == "HR")
-                {
-                    canAccess = true;
-                    canView = true;
-                    canCreate = true;
-                    canEdit = true;
-                    canDelete = false; // HR cannot delete departments/positions
-                }
-                // Employee: view only
-                else if (role == "Employee")
-                {
-                    canAccess = true;
-                    canView = true;
-                    canCreate = false;
-                    canEdit = false;
-                    canDelete = false;
-                }
-                
-                var permission = new RolePermission
-                {
-                    TenantId = defaultTenantId,
-                    RoleName = role,
-                    PagePath = page.Path,
-                    PageName = page.Name,
-                    CanAccess = canAccess,
-                    CanView = canView,
-                    CanCreate = canCreate,
-                    CanEdit = canEdit,
-                    CanDelete = canDelete,
-                    Description = page.Description
-                };
-                
-                await context.RolePermissions.AddAsync(permission);
-            }
-        }
-    }
-    
-    await context.SaveChangesAsync();
 }
 
 // Seed demo users for all roles (Development only)

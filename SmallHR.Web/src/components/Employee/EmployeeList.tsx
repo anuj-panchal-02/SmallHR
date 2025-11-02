@@ -10,8 +10,9 @@ import {
   ReloadOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType, TableProps } from 'antd/es/table';
-import { employeeAPI } from '../../services/api';
+import { employeeAPI, tenantAPI } from '../../services/api';
 import { useNotification } from '../../contexts/NotificationContext';
+import { useAuthStore } from '../../store/authStore';
 import type { Employee, EmployeeSearchRequest, PagedResponse } from '../../types/api';
 
 const { Search } = Input;
@@ -34,8 +35,11 @@ export default function EmployeeList({
   onRefresh,
 }: EmployeeListProps) {
   const notify = useNotification();
+  const { user } = useAuthStore();
+  const isSuperAdmin = user?.roles?.[0] === 'SuperAdmin';
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(false);
+  const [tenants, setTenants] = useState<any[]>([]);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [pagination, setPagination] = useState({
     current: 1,
@@ -51,8 +55,24 @@ export default function EmployeeList({
   const [departmentFilter, setDepartmentFilter] = useState<string | undefined>(undefined);
   const [positionFilter, setPositionFilter] = useState<string | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<boolean | undefined>(undefined);
+  const [tenantFilter, setTenantFilter] = useState<string | undefined>(undefined);
   const [sortBy, setSortBy] = useState<string>('FirstName');
   const [sortDirection, setSortDirection] = useState<string>('asc');
+
+  // Fetch tenants for SuperAdmin
+  useEffect(() => {
+    if (isSuperAdmin) {
+      const fetchTenants = async () => {
+        try {
+          const response = await tenantAPI.getAll();
+          setTenants(response.data);
+        } catch (error) {
+          console.error('Failed to fetch tenants:', error);
+        }
+      };
+      fetchTenants();
+    }
+  }, [isSuperAdmin]);
 
   const fetchEmployees = useCallback(async () => {
     setLoading(true);
@@ -66,6 +86,7 @@ export default function EmployeeList({
         pageSize: pagination.pageSize,
         sortBy,
         sortDirection,
+        tenantId: isSuperAdmin ? tenantFilter : undefined,
       };
 
       const response = await employeeAPI.search(searchRequest);
@@ -83,7 +104,7 @@ export default function EmployeeList({
     } finally {
       setLoading(false);
     }
-  }, [searchTerm, departmentFilter, positionFilter, statusFilter, pagination.current, pagination.pageSize, sortBy, sortDirection, notify]);
+  }, [searchTerm, departmentFilter, positionFilter, statusFilter, tenantFilter, pagination.current, pagination.pageSize, sortBy, sortDirection, isSuperAdmin, notify]);
 
   useEffect(() => {
     fetchEmployees();
@@ -289,6 +310,23 @@ export default function EmployeeList({
               onSearch={handleSearch}
               onChange={(e) => !e.target.value && handleSearch('')}
             />
+            {isSuperAdmin && (
+              <Select
+                placeholder="Tenant"
+                allowClear
+                style={{ width: 200 }}
+                size="large"
+                value={tenantFilter}
+                onChange={(value) => {
+                  setTenantFilter(value);
+                  setPagination(prev => ({ ...prev, current: 1 }));
+                }}
+                options={[
+                  { value: undefined, label: 'All Tenants' },
+                  ...tenants.map(t => ({ value: t.name || String(t.id), label: t.name || `Tenant ${t.id}` }))
+                ]}
+              />
+            )}
             <Select
               placeholder="Department"
               allowClear

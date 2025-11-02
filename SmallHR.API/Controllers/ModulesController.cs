@@ -22,9 +22,22 @@ public class ModulesController : ControllerBase
     [Authorize]
     public async Task<IActionResult> GetModules()
     {
-        var modules = await _db.Modules
-            .AsNoTracking()
-            .Where(m => m.IsActive && !m.IsDeleted)
+        // Check if user is SuperAdmin
+        var isSuperAdmin = User.IsInRole("SuperAdmin");
+        
+        // SuperAdmin gets all modules (no TenantId filter)
+        // Regular users get modules filtered by their TenantId
+        var query = _db.Modules.AsNoTracking().Where(m => m.IsActive && !m.IsDeleted);
+        
+        if (!isSuperAdmin)
+        {
+            // For non-SuperAdmin users, filter by TenantId
+            var tenantId = _tenantProvider.TenantId;
+            query = query.Where(m => m.TenantId == tenantId);
+        }
+        // SuperAdmin: no TenantId filter, gets all modules
+        
+        var modules = await query
             .OrderBy(m => m.ParentPath)
             .ThenBy(m => m.DisplayOrder)
             .ToListAsync();
@@ -73,12 +86,46 @@ public class ModulesController : ControllerBase
             new Core.Entities.Module { TenantId = tenantId, Name = "Payroll", Path = "/payroll", ParentPath = null, Icon = "money", DisplayOrder = 7, IsActive = true, Description = "Payroll root", CreatedAt = now, IsDeleted = false },
             new Core.Entities.Module { TenantId = tenantId, Name = "Payroll Reports", Path = "/payroll/reports", ParentPath = "/payroll", Icon = "bar-chart", DisplayOrder = 1, IsActive = true, Description = "Reports", CreatedAt = now, IsDeleted = false },
             new Core.Entities.Module { TenantId = tenantId, Name = "Payroll Settings", Path = "/payroll/settings", ParentPath = "/payroll", Icon = "setting", DisplayOrder = 2, IsActive = true, Description = "Settings", CreatedAt = now, IsDeleted = false },
+            new Core.Entities.Module { TenantId = tenantId, Name = "Tenant Settings", Path = "/tenant-settings", ParentPath = null, Icon = "apartment", DisplayOrder = 98, IsActive = true, Description = "Manage tenants", CreatedAt = now, IsDeleted = false },
             new Core.Entities.Module { TenantId = tenantId, Name = "Role Permissions", Path = "/role-permissions", ParentPath = null, Icon = "safety", DisplayOrder = 99, IsActive = true, Description = "Access control", CreatedAt = now, IsDeleted = false },
         };
 
         await _db.Modules.AddRangeAsync(mods);
         await _db.SaveChangesAsync();
         return Ok(new { message = "Modules seeded" });
+    }
+
+    [HttpPost("add-missing")]
+    [Authorize]
+    public async Task<IActionResult> AddMissingModules()
+    {
+        var tenantId = _tenantProvider.TenantId;
+        var now = DateTime.UtcNow;
+        int added = 0;
+
+        // Check and add Tenant Settings if missing
+        var tenantSettingsExists = await _db.Modules.AnyAsync(m => m.Path == "/tenant-settings" && m.TenantId == tenantId);
+        if (!tenantSettingsExists)
+        {
+            var tenantSettingsModule = new Core.Entities.Module
+            {
+                TenantId = tenantId,
+                Name = "Tenant Settings",
+                Path = "/tenant-settings",
+                ParentPath = null,
+                Icon = "apartment",
+                DisplayOrder = 98,
+                IsActive = true,
+                Description = "Manage tenants",
+                CreatedAt = now,
+                IsDeleted = false
+            };
+            await _db.Modules.AddAsync(tenantSettingsModule);
+            added++;
+        }
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = $"Added {added} missing module(s)" });
     }
 }
 

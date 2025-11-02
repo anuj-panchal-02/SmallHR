@@ -1,0 +1,54 @@
+### SuperAdmin Actions Test - REST Client
+### For use with VS Code REST Client extension or similar
+
+@baseUrl = http://localhost:5192
+@token = 
+
+### Step 1: Login as SuperAdmin
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "email": "superadmin@smallhr.com",
+  "password": "SuperAdmin@123"
+}
+
+### Step 2: Get Token (copy from response above)
+@token = <paste-token-here>
+
+### Step 3: Test User Management Endpoint (Admin Endpoint - Query filters bypassed)
+GET {{baseUrl}}/api/usermanagement/users
+Authorization: Bearer {{token}}
+
+### Step 4: Test Admin Controller - Verify SuperAdmin
+GET {{baseUrl}}/api/admin/verify-superadmin
+Authorization: Bearer {{token}}
+
+### Step 5: Test Admin Controller - Get SuperAdmin Users
+GET {{baseUrl}}/api/admin/superadmin-users
+Authorization: Bearer {{token}}
+
+### Step 6: Test Tenants Endpoint (Admin Endpoint - Query filters bypassed)
+GET {{baseUrl}}/api/tenants
+Authorization: Bearer {{token}}
+
+### Step 7: Check Audit Logs
+GET {{baseUrl}}/api/adminaudit?pageSize=10
+Authorization: Bearer {{token}}
+
+### Step 8: Check Audit Statistics
+GET {{baseUrl}}/api/adminaudit/statistics
+Authorization: Bearer {{token}}
+
+### Step 9: Test Regular Endpoint - Employees (Query filters should NOT be bypassed)
+GET {{baseUrl}}/api/employees
+Authorization: Bearer {{token}}
+
+### Step 10: Test Subscriptions Plans (Admin Endpoint)
+GET {{baseUrl}}/api/subscriptions/plans
+Authorization: Bearer {{token}}
+
+### Step 11: Get Specific Audit Log (after getting log ID from step 7)
+GET {{baseUrl}}/api/adminaudit/1
+Authorization: Bearer {{token}}
+

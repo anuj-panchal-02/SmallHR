@@ -21,5 +21,10 @@ public interface IEmailService
     /// Send generic email with custom subject and body
     /// </summary>
     Task SendEmailAsync(string email, string subject, string htmlBody);
+    
+    /// <summary>
+    /// Send tenant admin invite email with password setup link
+    /// </summary>
+    Task SendTenantAdminInviteEmailAsync(string email, string firstName, string tenantName, string passwordSetupToken, string userId);
 }
 

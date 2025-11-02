@@ -371,6 +371,60 @@ public class AuthController : ControllerBase
     }
     
     /// <summary>
+    /// Setup password for admin user (using userId and token)
+    /// Used for initial password setup when tenant admin is created
+    /// </summary>
+    [HttpPost("setup-password")]
+    [AllowAnonymous]
+    public async Task<ActionResult> SetupPassword([FromBody] SetupPasswordDto dto)
+    {
+        try
+        {
+            if (!ModelState.IsValid)
+            {
+                return BadRequest(ModelState);
+            }
+
+            if (string.IsNullOrWhiteSpace(dto.UserId) || string.IsNullOrWhiteSpace(dto.Token) || string.IsNullOrWhiteSpace(dto.NewPassword))
+            {
+                return BadRequest(new { message = "UserId, token, and new password are required" });
+            }
+
+            var user = await _userManager.FindByIdAsync(dto.UserId);
+            if (user == null)
+            {
+                return BadRequest(new { message = "Invalid setup link" });
+            }
+
+            var result = await _userManager.ResetPasswordAsync(user, Uri.UnescapeDataString(dto.Token), dto.NewPassword);
+            if (!result.Succeeded)
+            {
+                var errors = result.Errors.Select(e => e.Description).ToList();
+                _logger.LogWarning("Password setup failed for user {UserId}: {Errors}", dto.UserId, string.Join(", ", errors));
+                return BadRequest(new { 
+                    message = "Password setup failed", 
+                    errors = errors 
+                });
+            }
+
+            // Optionally confirm email if not already confirmed
+            if (!user.EmailConfirmed)
+            {
+                user.EmailConfirmed = true;
+                await _userManager.UpdateAsync(user);
+            }
+
+            _logger.LogInformation("Password setup successful for user: {UserId} ({Email})", dto.UserId, user.Email);
+            return Ok(new { message = "Password set successfully. You can now login." });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred during password setup");
+            return StatusCode(500, new { message = "An error occurred during password setup" });
+        }
+    }
+    
+    /// <summary>
     /// Set httpOnly cookies for access and refresh tokens
     /// </summary>
     private void SetAuthCookies(string accessToken, string refreshToken)

@@ -60,7 +60,8 @@ public class EmployeesController : ControllerBase
         [FromQuery] int pageNumber = 1,
         [FromQuery] int pageSize = 10,
         [FromQuery] string? sortBy = "FirstName",
-        [FromQuery] string? sortDirection = "asc")
+        [FromQuery] string? sortDirection = "asc",
+        [FromQuery] string? tenantId = null)
     {
         try
         {
@@ -71,6 +72,23 @@ public class EmployeesController : ControllerBase
             // Validate page number
             if (pageNumber < 1) pageNumber = 1;
 
+            // Check if user is SuperAdmin - only SuperAdmin can filter by tenantId
+            var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+            var isSuperAdmin = userRole == "SuperAdmin";
+            
+            // For SuperAdmin:
+            // - If tenantId is provided, use it to filter by specific tenant
+            // - If tenantId is null/empty, pass empty string to indicate "show all tenants"
+            // For non-SuperAdmin:
+            // - Always set tenantId to null (will use normal query filters)
+            string? tenantIdForRequest = null;
+            if (isSuperAdmin)
+            {
+                // If tenantId is null or empty, pass empty string to show all tenants
+                // If tenantId has a value, use it to filter by specific tenant
+                tenantIdForRequest = string.IsNullOrWhiteSpace(tenantId) ? "" : tenantId;
+            }
+
             var request = new EmployeeSearchRequest
             {
                 SearchTerm = searchTerm,
@@ -80,7 +98,8 @@ public class EmployeesController : ControllerBase
                 PageNumber = pageNumber,
                 PageSize = pageSize,
                 SortBy = sortBy,
-                SortDirection = sortDirection
+                SortDirection = sortDirection,
+                TenantId = tenantIdForRequest
             };
 
             var result = await _employeeService.SearchEmployeesAsync(request);
@@ -118,6 +137,29 @@ public class EmployeesController : ControllerBase
             
             // Validate page number
             if (request.PageNumber < 1) request.PageNumber = 1;
+
+            // Check if user is SuperAdmin - only SuperAdmin can filter by tenantId
+            var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+            var isSuperAdmin = userRole == "SuperAdmin";
+            
+            // For SuperAdmin:
+            // - If TenantId is provided in request, use it to filter by specific tenant
+            // - If TenantId is null/empty, set to empty string to indicate "show all tenants"
+            // For non-SuperAdmin:
+            // - Always set TenantId to null (will use normal query filters)
+            if (isSuperAdmin)
+            {
+                // If TenantId is null or empty, set to empty string to show all tenants
+                if (string.IsNullOrWhiteSpace(request.TenantId))
+                {
+                    request.TenantId = "";
+                }
+            }
+            else
+            {
+                // Non-SuperAdmin: always use normal query filters
+                request.TenantId = null;
+            }
 
             var result = await _employeeService.SearchEmployeesAsync(request);
             return Ok(result);

@@ -1,10 +1,12 @@
 using AutoMapper;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SmallHR.Core.DTOs;
 using SmallHR.Core.DTOs.Employee;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
+using SmallHR.Infrastructure.Data;
 
 namespace SmallHR.Infrastructure.Services;
 
@@ -16,6 +18,7 @@ public class EmployeeService : IEmployeeService
     private readonly UserManager<User> _userManager;
     private readonly RoleManager<IdentityRole> _roleManager;
     private readonly ILogger<EmployeeService> _logger;
+    private readonly ApplicationDbContext _context;
 
     public EmployeeService(
         IEmployeeRepository employeeRepository, 
@@ -23,7 +26,8 @@ public class EmployeeService : IEmployeeService
         ITenantProvider tenantProvider,
         UserManager<User> userManager,
         RoleManager<IdentityRole> roleManager,
-        ILogger<EmployeeService> logger)
+        ILogger<EmployeeService> logger,
+        ApplicationDbContext context)
     {
         _employeeRepository = employeeRepository;
         _mapper = mapper;
@@ -31,6 +35,7 @@ public class EmployeeService : IEmployeeService
         _userManager = userManager;
         _roleManager = roleManager;
         _logger = logger;
+        _context = context;
     }
 
     public async Task<IEnumerable<EmployeeDto>> GetAllEmployeesAsync()
@@ -61,6 +66,9 @@ public class EmployeeService : IEmployeeService
 
     public async Task<EmployeeDto> CreateEmployeeAsync(CreateEmployeeDto createEmployeeDto)
     {
+        // Check subscription limit
+        await CheckSubscriptionLimitAsync();
+        
         var employee = _mapper.Map<Employee>(createEmployeeDto);
         bool userCreatedOrLinked = false;
         
@@ -338,7 +346,8 @@ public class EmployeeService : IEmployeeService
             pageNumber: request.PageNumber,
             pageSize: request.PageSize,
             sortBy: request.SortBy,
-            sortDirection: request.SortDirection);
+            sortDirection: request.SortDirection,
+            tenantId: request.TenantId);
 
         var employeeDtos = _mapper.Map<IEnumerable<EmployeeDto>>(employees);
 
@@ -349,5 +358,42 @@ public class EmployeeService : IEmployeeService
             PageSize = request.PageSize,
             TotalCount = totalCount
         };
+    }
+
+    private async Task CheckSubscriptionLimitAsync()
+    {
+        // Get current tenant's subscription details
+        // Try to find tenant by Name matching TenantId, or by Domain
+        var tenant = await _context.Tenants
+            .AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Name.ToLower() == _tenantProvider.TenantId.ToLower() || 
+                                      (!string.IsNullOrEmpty(t.Domain) && t.Domain.ToLower() == _tenantProvider.TenantId.ToLower()));
+
+        if (tenant == null)
+        {
+            _logger.LogWarning("Tenant not found for TenantId: {TenantId}, using default limits", _tenantProvider.TenantId);
+            // If tenant not found, use default limits as fallback
+            // This handles the case where there's no tenant setup yet
+            return;
+        }
+
+        // Check if subscription is active
+        if (!tenant.IsSubscriptionActive)
+        {
+            throw new InvalidOperationException("Your subscription is not active. Please contact support to renew your subscription.");
+        }
+
+        // Get current employee count for this tenant
+        var currentEmployeeCount = await _employeeRepository.CountAsync(e => e.TenantId == _tenantProvider.TenantId);
+
+        // Check if limit is reached
+        if (currentEmployeeCount >= tenant.MaxEmployees)
+        {
+            throw new InvalidOperationException(
+                $"You have reached the maximum number of employees ({tenant.MaxEmployees}) allowed for your {tenant.SubscriptionPlan} subscription plan. " +
+                "Please upgrade your subscription to add more employees.");
+        }
+
+        _logger.LogInformation("Subscription check passed: {CurrentEmployees}/{MaxEmployees} employees", currentEmployeeCount, tenant.MaxEmployees);
     }
 }

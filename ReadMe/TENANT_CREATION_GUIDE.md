@@ -47,12 +47,14 @@ Verify:
 - Proceed to Step 3
 
 ### Option B: Database-Per-Tenant (stronger isolation)
-1) Create DB (e.g., `SmallHRDb_Acme`)
+**Note**: This is an optional advanced feature. By default, the system uses Shared Database with TenantId isolation.
+
+1) Create DB (e.g., `SmallHRDb_TenantName`)
 2) Apply EF migrations to that DB:
 ```powershell
 # One-time design-time connection for tools
-setx EF_CONNECTION "Server=...;Database=SmallHRDb_Acme;User Id=...;Password=...;TrustServerCertificate=True"
-$env:EF_CONNECTION="Server=...;Database=SmallHRDb_Acme;User Id=...;Password=...;TrustServerCertificate=True"
+setx EF_CONNECTION "Server=...;Database=SmallHRDb_TenantName;User Id=...;Password=...;TrustServerCertificate=True"
+$env:EF_CONNECTION="Server=...;Database=SmallHRDb_TenantName;User Id=...;Password=...;TrustServerCertificate=True"
 
 # Apply migrations
 cd smallHR
@@ -66,7 +68,7 @@ cd smallHR
 "ConnectionStrings": {
   "DefaultConnection": "Server=...;Database=SmallHRDb;...",
   "Tenants": {
-    "acme": "Server=...;Database=SmallHRDb_Acme;User Id=...;Password=...;TrustServerCertificate=True"
+    "tenantname": "Server=...;Database=SmallHRDb_TenantName;User Id=...;Password=...;TrustServerCertificate=True"
   }
 }
 ```

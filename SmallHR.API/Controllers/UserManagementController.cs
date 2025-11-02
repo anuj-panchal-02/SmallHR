@@ -119,6 +119,7 @@ public class UserManagementController : ControllerBase
             }
 
             // Create new user
+            // SuperAdmin users must have TenantId = null (platform layer)
             var user = new User
             {
                 UserName = request.Email,
@@ -126,7 +127,8 @@ public class UserManagementController : ControllerBase
                 FirstName = request.FirstName,
                 LastName = request.LastName,
                 DateOfBirth = request.DateOfBirth,
-                IsActive = true
+                IsActive = true,
+                TenantId = request.Role == "SuperAdmin" ? null : null // Will be set by tenant context if needed
             };
 
             var result = await _userManager.CreateAsync(user, request.Password);
@@ -142,6 +144,14 @@ public class UserManagementController : ControllerBase
 
             // Assign role
             await _userManager.AddToRoleAsync(user, request.Role);
+            
+            // Ensure SuperAdmin has TenantId = null after role assignment
+            if (request.Role == "SuperAdmin" && user.TenantId != null)
+            {
+                user.TenantId = null;
+                await _userManager.UpdateAsync(user);
+                _logger.LogInformation("Set TenantId = null for SuperAdmin user {Email}", user.Email);
+            }
 
             _logger.LogInformation("User created successfully: {Email} with role {Role}", request.Email, request.Role);
 

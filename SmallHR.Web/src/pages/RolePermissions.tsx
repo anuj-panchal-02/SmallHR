@@ -3,6 +3,7 @@ import { Switch, Button, message, Tag, Space, Popconfirm, Alert, Checkbox, Empty
 import { SaveOutlined, ReloadOutlined, CheckCircleOutlined, PlusOutlined, FolderOutlined, FolderOpenOutlined } from '@ant-design/icons';
 import api from '../services/api';
 import { useModulesStore } from '../store/modulesStore';
+import { useAuthStore } from '../store/authStore';
 import type { ModuleNode } from '../services/modules';
 
 interface RolePermission {
@@ -43,22 +44,135 @@ export default function RolePermissions() {
     fetchPermissions();
   }, []);
 
+  const { user } = useAuthStore();
+  const isSuperAdmin = user?.roles?.[0] === 'SuperAdmin';
+  
+  // For SuperAdmin, show only Admin role. For others, show all roles
+  const roles = isSuperAdmin ? ['Admin'] : ['SuperAdmin', 'Admin', 'HR', 'Employee'];
+
+  // Build modules from permissions if modules are empty (for SuperAdmin)
+  const getFallbackModulesFromPermissions = (permsToUse: RolePermission[]): ModuleNode[] => {
+    if (modules.length > 0 || permsToUse.length === 0) return [];
+    
+    // Filter permissions based on role for fallback
+    const filteredPerms = isSuperAdmin 
+      ? permsToUse.filter(p => p.roleName === 'Admin')
+      : permsToUse;
+    
+    if (filteredPerms.length === 0) return [];
+    
+    // Create a map of all page paths
+    const pathMap = new Map<string, ModuleNode>();
+    
+    // First pass: create all nodes from permissions
+    filteredPerms.forEach(perm => {
+      if (!pathMap.has(perm.pagePath)) {
+        pathMap.set(perm.pagePath, {
+          name: perm.pageName,
+          path: perm.pagePath,
+        });
+      }
+    });
+    
+    // Second pass: organize parent/child relationships
+    const childNodes: ModuleNode[] = [];
+    
+    pathMap.forEach((node, path) => {
+      // Special handling for known parent/child relationships
+      if (path === '/departments' || path === '/positions') {
+        // These are children of /organization
+        if (!pathMap.has('/organization')) {
+          // Create organization parent if it doesn't exist
+          pathMap.set('/organization', {
+            name: 'Organization',
+            path: '/organization',
+          });
+        }
+        const org = pathMap.get('/organization');
+        if (org) {
+          org.children = org.children || [];
+          org.children.push(node);
+          childNodes.push(node);
+        }
+      } else if (path.startsWith('/payroll/')) {
+        // Payroll children
+        if (!pathMap.has('/payroll')) {
+          pathMap.set('/payroll', {
+            name: 'Payroll',
+            path: '/payroll',
+          });
+        }
+        const payroll = pathMap.get('/payroll');
+        if (payroll) {
+          payroll.children = payroll.children || [];
+          payroll.children.push(node);
+          childNodes.push(node);
+        }
+      }
+    });
+    
+    // Third pass: organize remaining parent/child relationships
+    const finalNodes: ModuleNode[] = [];
+    pathMap.forEach((node, path) => {
+      // Skip if already added as child
+      if (childNodes.includes(node)) return;
+      
+      // Check if it has children
+      const children = Array.from(pathMap.values()).filter(n => 
+        n.path !== path && 
+        n.path.startsWith(path + '/') &&
+        n.path.split('/').filter(p => p).length === path.split('/').filter(p => p).length + 1
+      );
+      
+      if (children.length > 0) {
+        node.children = children;
+        // Mark children as processed
+        children.forEach(c => childNodes.push(c));
+      }
+      
+      if (!childNodes.includes(node)) {
+        finalNodes.push(node);
+      }
+    });
+    
+    return finalNodes;
+  };
+
   const fetchPermissions = async () => {
     setLoading(true);
     try {
       const response = await api.get('/rolepermissions');
-      setPermissions(response.data);
+      const fetchedPermissions = Array.isArray(response.data) ? response.data : [];
+      setPermissions(fetchedPermissions);
       setChangedPermissions(new Set());
-      // Auto-expand all modules initially
-      const allModulePaths = getAllModulePaths(modules);
-      setExpandedModules(allModulePaths);
+      
+      // Log for debugging
+      if (fetchedPermissions.length === 0) {
+        console.log('No permissions returned from API');
+      } else {
+        console.log(`Loaded ${fetchedPermissions.length} permissions`);
+      }
+      
+      // Auto-expand all modules initially (after modules are available)
+      setTimeout(() => {
+        const modulesToUseForExpansion = modules.length === 0 && fetchedPermissions.length > 0
+          ? getFallbackModulesFromPermissions(fetchedPermissions)
+          : modules;
+        const allModulePaths = getAllModulePaths(modulesToUseForExpansion);
+        setExpandedModules(allModulePaths);
+      }, 100);
     } catch (error: any) {
       if (error.response?.status === 404 || error.response?.data?.includes('no permissions')) {
-        message.info('No permissions found. Click "Initialize Permissions" to set up default permissions.');
+        message.info(
+          isSuperAdmin 
+            ? 'No Admin permissions found. Click "Initialize Permissions" to create default Admin role permissions.'
+            : 'No permissions found. Click "Initialize Permissions" to set up default permissions.'
+        );
+        setPermissions([]);
       } else {
         message.error('Failed to load permissions');
+        console.error('Error fetching permissions:', error);
       }
-      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -74,6 +188,11 @@ export default function RolePermissions() {
     });
     return paths;
   };
+
+  // Filter permissions based on role - for SuperAdmin, show only Admin permissions
+  const filteredPermissions = isSuperAdmin 
+    ? permissions.filter(p => p.roleName === 'Admin')
+    : permissions;
 
   const markChanged = (id: number) => setChangedPermissions(prev => new Set(prev).add(id));
 
@@ -94,7 +213,8 @@ export default function RolePermissions() {
       const matches = includeChildren 
         ? (p.pagePath === modulePath || p.pagePath.startsWith(modulePath + '/'))
         : p.pagePath === modulePath;
-      if (matches) {
+      // Only update permissions for the allowed role (for SuperAdmin, only Admin)
+      if (matches && (isSuperAdmin ? p.roleName === 'Admin' : true)) {
         return { ...p, canAccess: checked } as RolePermission;
       }
       return p;
@@ -104,16 +224,33 @@ export default function RolePermissions() {
       const matches = includeChildren 
         ? (p.pagePath === modulePath || p.pagePath.startsWith(modulePath + '/'))
         : p.pagePath === modulePath;
-      return matches;
+      return matches && (isSuperAdmin ? p.roleName === 'Admin' : true);
     });
     perms.forEach(p => markChanged(p.id));
   };
 
   const toggleSelectedAccess = (checked: boolean, includeChildren: boolean) => {
+    // For SuperAdmin, only allow changing Admin role permissions
+    // Filter selectedRoles to only include Admin if SuperAdmin
+    const rolesToUpdate = isSuperAdmin 
+      ? selectedRoles.filter(r => r === 'Admin')
+      : selectedRoles;
+    
+    if (rolesToUpdate.length === 0) {
+      message.warning(isSuperAdmin ? 'Only Admin role can be modified' : 'Please select at least one role');
+      return;
+    }
+    
+    // Temporarily override selectedRoles for bulk update
+    const originalSelectedRoles = selectedRoles;
+    setSelectedRoles(rolesToUpdate);
+    
     selectedModules.forEach(modulePath => {
       toggleBulkAccess(modulePath, checked, includeChildren);
     });
+    
     setSelectedModules(new Set());
+    setSelectedRoles(originalSelectedRoles);
   };
 
   const handleSaveChanges = async () => {
@@ -148,7 +285,18 @@ export default function RolePermissions() {
     try {
       await api.post('/rolepermissions/initialize', null);
       message.success('Permissions initialized successfully!');
-      fetchPermissions();
+      
+      // Refresh permissions in the page
+      await fetchPermissions();
+      
+      // Refresh modules store to reload menu items from database
+      refresh();
+      
+      // Refresh permissions in auth store so menu can check access
+      const { fetchPermissions: fetchAuthPermissions } = useAuthStore.getState();
+      await fetchAuthPermissions();
+      
+      message.info('Menu will refresh automatically...');
     } catch (error: any) {
       message.error(error.response?.data?.message || 'Failed to initialize permissions');
       console.error(error);
@@ -180,7 +328,7 @@ export default function RolePermissions() {
 
   const buildModuleGroups = (moduleNodes: ModuleNode[]): ModuleGroup[] => {
     return moduleNodes.map(module => {
-      const modulePermissions = permissions.filter(p => p.pagePath === module.path);
+      const modulePermissions = filteredPermissions.filter(p => p.pagePath === module.path);
       const children = module.children ? buildModuleGroups(module.children) : [];
       return {
         module,
@@ -190,17 +338,22 @@ export default function RolePermissions() {
     });
   };
 
-  const moduleGroups = buildModuleGroups(modules);
-  const roles = ['SuperAdmin', 'Admin', 'HR', 'Employee'];
+  // Use fallback modules if modules are empty but permissions exist
+  const modulesToUse = modules.length === 0 && filteredPermissions.length > 0
+    ? getFallbackModulesFromPermissions(permissions)
+    : modules;
+
+  const moduleGroups = buildModuleGroups(modulesToUse);
 
   const renderPermissionSwitches = (path: string) => {
     return (
       <div style={{ display: 'flex', gap: 16, justifyContent: 'center' }}>
         {roles.map(role => {
-          const perm = permissions.find(p => p.pagePath === path && p.roleName === role);
+          const perm = filteredPermissions.find(p => p.pagePath === path && p.roleName === role);
           if (!perm) return <div key={role} style={{ width: 90 }} />;
           
-          const disabled = role === 'SuperAdmin';
+          // SuperAdmin can edit Admin permissions, so don't disable for SuperAdmin
+          const disabled = !isSuperAdmin && role === 'SuperAdmin';
           const isChecked = perm.canAccess;
 
           return (
@@ -439,24 +592,42 @@ export default function RolePermissions() {
             <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-primary)' }}>
               {selectedModules.size} module(s) selected
             </div>
-            <Checkbox.Group
-              options={roles.map(r => ({ label: r, value: r }))}
-              value={selectedRoles}
-              onChange={(vals) => setSelectedRoles(vals as string[])}
-            />
+            {isSuperAdmin ? (
+              <div style={{ fontSize: 13, color: 'var(--color-text-secondary)' }}>
+                Managing: <Tag color="red">Admin</Tag> role for all tenants
+              </div>
+            ) : (
+              <Checkbox.Group
+                options={roles.map(r => ({ label: r, value: r }))}
+                value={selectedRoles}
+                onChange={(vals) => setSelectedRoles(vals as string[])}
+              />
+            )}
             <Divider type="vertical" />
             <Button
               size="small"
-              onClick={() => toggleSelectedAccess(true, false)}
-              disabled={selectedRoles.length === 0}
+              onClick={() => {
+                // For SuperAdmin, auto-set Admin role
+                if (isSuperAdmin && selectedRoles.length === 0) {
+                  setSelectedRoles(['Admin']);
+                }
+                toggleSelectedAccess(true, false);
+              }}
+              disabled={!isSuperAdmin && selectedRoles.length === 0}
             >
               Grant Access
             </Button>
             <Button
               size="small"
               danger
-              onClick={() => toggleSelectedAccess(false, false)}
-              disabled={selectedRoles.length === 0}
+              onClick={() => {
+                // For SuperAdmin, auto-set Admin role
+                if (isSuperAdmin && selectedRoles.length === 0) {
+                  setSelectedRoles(['Admin']);
+                }
+                toggleSelectedAccess(false, false);
+              }}
+              disabled={!isSuperAdmin && selectedRoles.length === 0}
             >
               Revoke Access
             </Button>
@@ -473,10 +644,21 @@ export default function RolePermissions() {
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
             <Empty description="Loading permissions..." />
           </div>
+        ) : filteredPermissions.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px 0' }}>
+            <Empty 
+              description={
+                isSuperAdmin 
+                  ? "No Admin permissions found. Click 'Initialize Permissions' to create default Admin role permissions."
+                  : "No permissions found. Click 'Initialize Permissions' to set up default permissions."
+              }
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+            />
+          </div>
         ) : moduleGroups.length === 0 ? (
           <div style={{ textAlign: 'center', padding: '40px 0' }}>
             <Empty 
-              description="No modules found" 
+              description="No modules found. Permissions exist but couldn't be organized into modules." 
               image={Empty.PRESENTED_IMAGE_SIMPLE}
             />
           </div>

@@ -117,6 +117,43 @@ public class ConsoleEmailService : IEmailService
         _logger.LogInformation("📧 Welcome email sent to {Email}", email);
     }
 
+    public async Task SendTenantAdminInviteEmailAsync(string email, string firstName, string tenantName, string passwordSetupToken, string userId)
+    {
+        var baseUrl = _configuration["AppSettings:BaseUrl"] ?? "http://localhost:5173";
+        var setupLink = $"{baseUrl}/setup-password?token={Uri.EscapeDataString(passwordSetupToken)}&userId={userId}";
+        
+        var htmlBody = $@"
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+        .button {{ display: inline-block; padding: 12px 24px; background-color: #4f46e5; color: white; text-decoration: none; border-radius: 8px; margin: 20px 0; }}
+        .button:hover {{ background-color: #4338ca; }}
+        .footer {{ margin-top: 40px; font-size: 12px; color: #666; }}
+    </style>
+</head>
+<body>
+    <div class=""container"">
+        <h2>Welcome to {tenantName}, {firstName}!</h2>
+        <p>You've been invited to set up your admin account for <strong>{tenantName}</strong>.</p>
+        <p>Click the button below to set your password and activate your account:</p>
+        <a href=""{setupLink}"" class=""button"">Set Up Password</a>
+        <p>Or copy and paste this link into your browser:</p>
+        <p style=""word-break: break-all;"">{setupLink}</p>
+        <p><strong>This link will expire in 7 days.</strong></p>
+        <div class=""footer"">
+            <p>If you didn't expect this invitation, you can safely ignore this email.</p>
+        </div>
+    </div>
+</body>
+</html>";
+
+        await SendEmailAsync(email, $"Set Up Your Admin Account - {tenantName}", htmlBody);
+        _logger.LogInformation("📧 Tenant admin invite email sent to {Email} for tenant {TenantName}", email, tenantName);
+    }
+
     public async Task SendEmailAsync(string email, string subject, string htmlBody)
     {
         // For development: Log to console instead of sending actual emails

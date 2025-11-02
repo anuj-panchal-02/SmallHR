@@ -8,6 +8,8 @@ public class DesignTimeDbContextFactory : IDesignTimeDbContextFactory<Applicatio
 {
     public ApplicationDbContext CreateDbContext(string[] args)
     {
+        // Always use DefaultConnection for migrations (master/registry database where Tenants table lives)
+        // Override with environment variable if set
         var envConn = Environment.GetEnvironmentVariable("EF_CONNECTION");
         var connectionString = string.IsNullOrWhiteSpace(envConn)
             ? "Server=(localdb)\\mssqllocaldb;Database=SmallHRDb;Trusted_Connection=true;MultipleActiveResultSets=true"

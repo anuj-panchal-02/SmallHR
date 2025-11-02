@@ -55,9 +55,32 @@ public class EmployeeRepository : GenericRepository<Employee>, IEmployeeReposito
         int pageNumber = 1,
         int pageSize = 10,
         string? sortBy = "FirstName",
-        string? sortDirection = "asc")
+        string? sortDirection = "asc",
+        string? tenantId = null)
     {
         var query = _dbSet.AsQueryable();
+
+        // SuperAdmin filtering logic:
+        // - If tenantId is provided (non-empty), ignore query filters and filter by that specific tenant
+        // - If tenantId is empty string (""), it means SuperAdmin wants to see ALL tenants - ignore query filters
+        // - If tenantId is null, use normal query filters (regular user or tenantId not provided)
+        
+        // Note: The controller/service will pass empty string ("") when SuperAdmin wants all tenants
+        // and a specific tenant name when SuperAdmin wants to filter by tenant
+        
+        if (tenantId != null)
+        {
+            // tenantId parameter was provided (SuperAdmin context)
+            query = query.IgnoreQueryFilters();
+            
+            if (!string.IsNullOrWhiteSpace(tenantId))
+            {
+                // Filter to specific tenant
+                query = query.Where(e => e.TenantId == tenantId);
+            }
+            // else tenantId is empty string - show all tenants (no additional filter)
+        }
+        // else: tenantId is null - use normal query filters (regular user)
 
         // Filter out deleted employees
         query = query.Where(e => !e.IsDeleted);

@@ -13,10 +13,14 @@ import {
   CrownOutlined,
   UserOutlined,
   PlusCircleOutlined,
+  ApartmentOutlined,
+  DollarOutlined,
+  BellOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import PageHeader from '../components/PageHeader';
 import api from '../services/api';
+import { useNavigate } from 'react-router-dom';
 
 interface User {
   id: string;
@@ -29,6 +33,7 @@ interface User {
 }
 
 export default function SuperAdminDashboard() {
+  const navigate = useNavigate();
   const notify = useNotification();
   const [users, setUsers] = useState<User[]>([]);
   const [roles, setRoles] = useState<string[]>([]);
@@ -406,6 +411,67 @@ export default function SuperAdminDashboard() {
               valueStyle={{ color: 'var(--color-text-primary, #1E293B)', fontFamily: 'Inter, sans-serif', fontWeight: 700, fontSize: 28 }}
               prefix={<UserOutlined style={{ color: 'var(--color-accent, #06B6D4)' }} />}
             />
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Quick Access Cards */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+        <Col xs={24} sm={12} md={8}>
+          <Card
+            hoverable
+            onClick={() => navigate('/admin/tenants')}
+            bordered={false}
+            style={{
+              borderRadius: 20,
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+            }}
+          >
+            <div style={{ textAlign: 'center' }}>
+              <ApartmentOutlined style={{ fontSize: 48, color: '#4F46E5', marginBottom: 16 }} />
+              <h3 style={{ margin: 0, marginBottom: 8 }}>Tenants</h3>
+              <p style={{ margin: 0, color: '#64748B' }}>Manage tenants, view details, impersonate</p>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={8}>
+          <Card
+            hoverable
+            onClick={() => navigate('/admin/billing')}
+            bordered={false}
+            style={{
+              borderRadius: 20,
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+            }}
+          >
+            <div style={{ textAlign: 'center' }}>
+              <DollarOutlined style={{ fontSize: 48, color: '#10B981', marginBottom: 16 }} />
+              <h3 style={{ margin: 0, marginBottom: 8 }}>Billing Center</h3>
+              <p style={{ margin: 0, color: '#64748B' }}>View webhooks, reconcile payments</p>
+            </div>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={8}>
+          <Card
+            hoverable
+            onClick={() => navigate('/admin/alerts')}
+            bordered={false}
+            style={{
+              borderRadius: 20,
+              boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+            }}
+          >
+            <div style={{ textAlign: 'center' }}>
+              <BellOutlined style={{ fontSize: 48, color: '#EF4444', marginBottom: 16 }} />
+              <h3 style={{ margin: 0, marginBottom: 8 }}>Alerts Hub</h3>
+              <p style={{ margin: 0, color: '#64748B' }}>Payment failures, overages, errors</p>
+            </div>
           </Card>
         </Col>
       </Row>

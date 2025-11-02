@@ -226,9 +226,25 @@ public class AuthService : IAuthService
         };
 
         claims.AddRange(roles.Select(role => new Claim(ClaimTypes.Role, role)));
-        // Tenant claim
-        var tenantId = _tenantProvider.TenantId;
-        claims.Add(new Claim("tenant", tenantId));
+        
+        // Tenant claims (both "TenantId" and "tenant" for compatibility)
+        // SuperAdmin users don't have TenantId - they operate at platform layer
+        var isSuperAdmin = roles.Contains("SuperAdmin");
+        if (!isSuperAdmin)
+        {
+            var tenantId = user.TenantId ?? _tenantProvider.TenantId;
+            if (!string.IsNullOrWhiteSpace(tenantId) && tenantId != "platform" && tenantId != "default")
+            {
+                claims.Add(new Claim("TenantId", tenantId));
+                claims.Add(new Claim("tenant", tenantId)); // Legacy claim name for backwards compatibility
+            }
+        }
+        // SuperAdmin gets a special platform claim instead
+        else
+        {
+            claims.Add(new Claim("TenantId", "platform"));
+            claims.Add(new Claim("tenant", "platform")); // For compatibility
+        }
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);

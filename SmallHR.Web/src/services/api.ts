@@ -141,6 +141,9 @@ export const authAPI = {
   
   resetPassword: (data: { email: string; token: string; newPassword: string }) =>
     api.post('/auth/reset-password', data),
+  
+  setupPassword: (data: { userId: string; token: string; newPassword: string }) =>
+    api.post('/auth/setup-password', data),
 };
 
 // Employee API
@@ -280,6 +283,11 @@ export const positionAPI = {
   
   delete: (id: number) =>
     api.delete(`/positions/${id}`),
+};
+
+// Tenant API
+export const tenantAPI = {
+  getAll: () => api.get<any[]>('/tenants'),
 };
 
 export default api;

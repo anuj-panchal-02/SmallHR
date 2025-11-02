@@ -48,5 +48,10 @@ public class EmployeeSearchRequest
     /// Sort direction (asc or desc)
     /// </summary>
     public string? SortDirection { get; set; } = "asc";
+    
+    /// <summary>
+    /// Filter by tenant ID (SuperAdmin only)
+    /// </summary>
+    public string? TenantId { get; set; }
 }
 

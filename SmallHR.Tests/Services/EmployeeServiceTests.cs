@@ -1,5 +1,7 @@
 using AutoMapper;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Moq;
 using SmallHR.Core.DTOs.Employee;
 using SmallHR.Core.Entities;
@@ -16,6 +18,9 @@ public class EmployeeServiceTests
     private readonly IMapper _mapper;
     private readonly EmployeeService _service;
     private readonly Mock<ITenantProvider> _mockTenantProvider;
+    private readonly Mock<UserManager<User>> _mockUserManager;
+    private readonly Mock<RoleManager<IdentityRole>> _mockRoleManager;
+    private readonly ILogger<EmployeeService> _logger;
 
     public EmployeeServiceTests()
     {
@@ -23,10 +28,30 @@ public class EmployeeServiceTests
         _mockTenantProvider = new Mock<ITenantProvider>();
         _mockTenantProvider.Setup(t => t.TenantId).Returns("default");
         
+        _mockUserManager = new Mock<UserManager<User>>(
+            Mock.Of<IUserStore<User>>(),
+            null!, null!, null!, null!, null!, null!, null!, null!
+        );
+        
+        _mockRoleManager = new Mock<RoleManager<IdentityRole>>(
+            Mock.Of<IRoleStore<IdentityRole>>(),
+            null!, null!, null!, null!
+        );
+        
+        using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
+        _logger = loggerFactory.CreateLogger<EmployeeService>();
+        
         var config = new MapperConfiguration(cfg => cfg.AddProfile<MappingProfile>());
         _mapper = config.CreateMapper();
         
-        _service = new EmployeeService(_mockRepository.Object, _mapper, _mockTenantProvider.Object);
+        // Create a mock ApplicationDbContext - we'll use InMemory database for tests
+        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(databaseName: Guid.NewGuid().ToString())
+            .Options;
+        
+        var mockContext = new ApplicationDbContext(options, _mockTenantProvider.Object);
+        
+        _service = new EmployeeService(_mockRepository.Object, _mapper, _mockTenantProvider.Object, _mockUserManager.Object, _mockRoleManager.Object, _logger, mockContext);
     }
 
     [Fact]

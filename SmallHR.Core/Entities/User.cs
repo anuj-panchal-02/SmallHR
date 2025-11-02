@@ -4,6 +4,9 @@ namespace SmallHR.Core.Entities;
 
 public class User : IdentityUser
 {
+    // Tenant association
+    public string? TenantId { get; set; }
+    
     public string FirstName { get; set; } = string.Empty;
     
     public string LastName { get; set; } = string.Empty;
