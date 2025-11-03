@@ -29,9 +29,9 @@ public class PositionService : IPositionService
         _tenantProvider = tenantProvider;
     }
 
-    public async Task<IEnumerable<PositionDto>> GetAllPositionsAsync()
+    public async Task<IEnumerable<PositionDto>> GetAllPositionsAsync(string? tenantId = null)
     {
-        var positions = await _positionRepository.GetAllAsync();
+        var positions = await _positionRepository.GetAllAsync(tenantId);
         var positionDtos = new List<PositionDto>();
 
         foreach (var pos in positions)
@@ -44,8 +44,17 @@ public class PositionService : IPositionService
                 dto.DepartmentName = dept?.Name;
             }
             
-            dto.EmployeeCount = await _context.Employees
-                .CountAsync(e => e.Position == pos.Title && !e.IsDeleted);
+            // Get employee count (respect tenant filter if provided)
+            var employeeQuery = _context.Employees.Where(e => e.Position == pos.Title && !e.IsDeleted);
+            if (tenantId != null)
+            {
+                employeeQuery = employeeQuery.IgnoreQueryFilters();
+                if (!string.IsNullOrWhiteSpace(tenantId))
+                {
+                    employeeQuery = employeeQuery.Where(e => e.TenantId == tenantId);
+                }
+            }
+            dto.EmployeeCount = await employeeQuery.CountAsync();
             
             positionDtos.Add(dto);
         }

@@ -237,11 +237,19 @@ export default function TenantsList() {
       if (subscriptionStatusFilter) params.subscriptionStatus = subscriptionStatusFilter;
 
       const response = await api.get('/admin/tenants', { params });
-      setTenants(response.data.tenants || []);
-      setTotalCount(response.data.totalCount || 0);
+      // Handle response - support camelCase and PascalCase
+      const tenantsData = response.data?.tenants || response.data?.Tenants || (Array.isArray(response.data) ? response.data : []);
+      const totalCountData = response.data?.totalCount || response.data?.TotalCount || tenantsData.length;
+
+      if (Array.isArray(tenantsData)) {
+        setTenants(tenantsData);
+        setTotalCount(totalCountData);
+      } else {
+        setTenants([]);
+        setTotalCount(0);
+      }
     } catch (error: any) {
       notify.error('Failed to Load Tenants', error.response?.data?.message || 'Unable to fetch tenant list.');
-      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -258,32 +266,51 @@ export default function TenantsList() {
     try {
       const response = await api.post(`/admin/tenants/${selectedTenant.id}/impersonate?durationMinutes=30`);
       
-      // Store impersonation token
-      localStorage.setItem('impersonationToken', response.data.impersonationToken);
-      localStorage.setItem('impersonatedTenant', JSON.stringify({
-        id: response.data.tenant.id,
-        name: response.data.tenant.name,
-        expiresAt: response.data.expiresAt,
-      }));
-
-      // Update API client to use impersonation token
-      api.defaults.headers.common['Authorization'] = `Bearer ${response.data.impersonationToken}`;
-
-      setIsImpersonating(true);
-      setImpersonatedTenant({
-        id: response.data.tenant.id,
-        name: response.data.tenant.name,
-        expiresAt: response.data.expiresAt,
-      });
-
-      notify.success('Impersonation Started', response.data.banner);
-      setImpersonateModalVisible(false);
+      console.log('Impersonate response:', response.data);
       
-      // Refresh tenant list with new token
-      fetchTenants();
+      // Handle both camelCase and PascalCase property names
+      const tenantData = response.data.tenant || response.data.Tenant;
+      const impersonationToken = response.data.impersonationToken || response.data.ImpersonationToken;
+      const expiresAt = response.data.expiresAt || response.data.ExpiresAt;
+      const banner = response.data.banner || response.data.Banner;
+      
+      if (!tenantData) {
+        console.error('Tenant data not found in response:', response.data);
+        notify.error('Impersonation Failed', 'Invalid response from server');
+        return;
+      }
+      
+      // Store impersonation token
+      if (impersonationToken) {
+        localStorage.setItem('impersonationToken', impersonationToken);
+        localStorage.setItem('impersonatedTenant', JSON.stringify({
+          id: tenantData.id || tenantData.Id,
+          name: tenantData.name || tenantData.Name,
+          expiresAt: expiresAt,
+        }));
+
+        // Update API client to use impersonation token
+        api.defaults.headers.common['Authorization'] = `Bearer ${impersonationToken}`;
+
+        setIsImpersonating(true);
+        setImpersonatedTenant({
+          id: tenantData.id || tenantData.Id,
+          name: tenantData.name || tenantData.Name,
+          expiresAt: expiresAt,
+        });
+
+        notify.success('Impersonation Started', banner || 'Impersonation started successfully');
+        setImpersonateModalVisible(false);
+        
+        // Refresh tenant list with new token
+        fetchTenants();
+      } else {
+        notify.error('Impersonation Failed', 'No impersonation token received');
+      }
     } catch (error: any) {
+      console.error('Impersonation error:', error);
+      console.error('Error response:', error.response?.data);
       notify.error('Impersonation Failed', error.response?.data?.message || 'Unable to impersonate tenant.');
-      console.error(error);
     }
   };
 

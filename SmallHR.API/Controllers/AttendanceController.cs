@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.DTOs.Attendance;
 using SmallHR.Core.Interfaces;
 
@@ -8,34 +10,31 @@ namespace SmallHR.API.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
-public class AttendanceController : ControllerBase
+public class AttendanceController : BaseApiController
 {
     private readonly IAttendanceService _attendanceService;
-    private readonly ILogger<AttendanceController> _logger;
 
     public AttendanceController(IAttendanceService attendanceService, ILogger<AttendanceController> logger)
+        : base(logger)
     {
         _attendanceService = attendanceService;
-        _logger = logger;
     }
 
     /// <summary>
     /// Get all attendance records
     /// </summary>
     [HttpGet]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
-    public async Task<ActionResult<IEnumerable<AttendanceDto>>> GetAttendance()
+    [AuthorizeHR]
+    public async Task<ActionResult<IEnumerable<AttendanceDto>>> GetAttendance([FromQuery] string? tenantId = null)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAllAttendanceAsync();
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance records");
-            return StatusCode(500, new { message = "An error occurred while getting attendance records" });
-        }
+        var tenantIdForRequest = HttpContext.RequestServices
+            .GetRequiredService<ITenantFilterService>()
+            .ResolveTenantIdForRequest(IsSuperAdmin, tenantId);
+
+        return await HandleCollectionResultAsync(
+            () => _attendanceService.GetAllAttendanceAsync(tenantIdForRequest),
+            "getting attendance records"
+        );
     }
 
     /// <summary>
@@ -44,21 +43,11 @@ public class AttendanceController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<AttendanceDto>> GetAttendance(int id)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAttendanceByIdAsync(id);
-            if (attendance == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance record with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while getting attendance record" });
-        }
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _attendanceService.GetAttendanceByIdAsync(id),
+            $"getting attendance record with ID {id}",
+            "Attendance"
+        );
     }
 
     /// <summary>
@@ -67,103 +56,67 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}")]
     public async Task<ActionResult<IEnumerable<AttendanceDto>>> GetAttendanceByEmployee(int employeeId)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAttendanceByEmployeeIdAsync(employeeId);
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance records for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting attendance records" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _attendanceService.GetAttendanceByEmployeeIdAsync(employeeId),
+            $"getting attendance records for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
     /// Create new attendance record
     /// </summary>
     [HttpPost]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<AttendanceDto>> CreateAttendance(CreateAttendanceDto createAttendanceDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
+            return BadRequest(ModelState);
+        }
 
-            var attendance = await _attendanceService.CreateAttendanceAsync(createAttendanceDto);
-            return CreatedAtAction(nameof(GetAttendance), new { id = attendance.Id }, attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while creating attendance record");
-            return StatusCode(500, new { message = "An error occurred while creating attendance record" });
-        }
+        return await HandleCreateResultAsync(
+            () => _attendanceService.CreateAttendanceAsync(createAttendanceDto),
+            nameof(GetAttendance),
+            att => att.Id,
+            "creating attendance record"
+        );
     }
 
     /// <summary>
     /// Update attendance record
     /// </summary>
     [HttpPut("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<AttendanceDto>> UpdateAttendance(int id, UpdateAttendanceDto updateAttendanceDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (!await _attendanceService.AttendanceExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var attendance = await _attendanceService.UpdateAttendanceAsync(id, updateAttendanceDto);
-            if (attendance == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(attendance);
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while updating attendance record with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while updating attendance record" });
-        }
+
+        return await HandleUpdateResultAsync(
+            () => _attendanceService.AttendanceExistsAsync(id),
+            () => _attendanceService.UpdateAttendanceAsync(id, updateAttendanceDto),
+            id,
+            "updating attendance record",
+            "Attendance"
+        );
     }
 
     /// <summary>
     /// Delete attendance record
     /// </summary>
     [HttpDelete("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult> DeleteAttendance(int id)
     {
-        try
-        {
-            if (!await _attendanceService.AttendanceExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var result = await _attendanceService.DeleteAttendanceAsync(id);
-            if (!result)
-            {
-                return BadRequest();
-            }
-
-            return NoContent();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while deleting attendance record with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while deleting attendance record" });
-        }
+        return await HandleDeleteResultAsync(
+            () => _attendanceService.AttendanceExistsAsync(id),
+            () => _attendanceService.DeleteAttendanceAsync(id),
+            id,
+            "deleting attendance record",
+            "Attendance"
+        );
     }
 
     /// <summary>
@@ -172,21 +125,15 @@ public class AttendanceController : ControllerBase
     [HttpPost("clock-in")]
     public async Task<ActionResult<AttendanceDto>> ClockIn(ClockInDto clockInDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
+            return BadRequest(ModelState);
+        }
 
-            var attendance = await _attendanceService.ClockInAsync(clockInDto);
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during clock in for employee ID: {EmployeeId}", clockInDto.EmployeeId);
-            return StatusCode(500, new { message = "An error occurred during clock in" });
-        }
+        return await HandleServiceResultAsync(
+            () => _attendanceService.ClockInAsync(clockInDto),
+            $"clocking in for employee ID {clockInDto.EmployeeId}"
+        );
     }
 
     /// <summary>
@@ -195,25 +142,25 @@ public class AttendanceController : ControllerBase
     [HttpPost("clock-out")]
     public async Task<ActionResult<AttendanceDto>> ClockOut(ClockOutDto clockOutDto)
     {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
         try
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
             var attendance = await _attendanceService.ClockOutAsync(clockOutDto);
             if (attendance == null)
             {
-                return BadRequest(new { message = "No clock in record found for today" });
+                return CreateBadRequestResponse("No clock in record found for today");
             }
 
             return Ok(attendance);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "An error occurred during clock out for employee ID: {EmployeeId}", clockOutDto.EmployeeId);
-            return StatusCode(500, new { message = "An error occurred during clock out" });
+            Logger.LogError(ex, "An error occurred during clock out for employee ID: {EmployeeId}", clockOutDto.EmployeeId);
+            return CreateErrorResponse("An error occurred during clock out", ex);
         }
     }
 
@@ -226,16 +173,10 @@ public class AttendanceController : ControllerBase
         [FromQuery] DateTime startDate, 
         [FromQuery] DateTime endDate)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAttendanceByDateRangeAsync(employeeId, startDate, endDate);
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance records by date range for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting attendance records by date range" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _attendanceService.GetAttendanceByDateRangeAsync(employeeId, startDate, endDate),
+            $"getting attendance records by date range for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -244,21 +185,11 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}/date")]
     public async Task<ActionResult<AttendanceDto>> GetAttendanceByEmployeeAndDate(int employeeId, [FromQuery] DateTime date)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAttendanceByEmployeeAndDateAsync(employeeId, date);
-            if (attendance == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance record for employee ID: {EmployeeId} and date: {Date}", employeeId, date);
-            return StatusCode(500, new { message = "An error occurred while getting attendance record" });
-        }
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _attendanceService.GetAttendanceByEmployeeAndDateAsync(employeeId, date),
+            $"getting attendance record for employee ID {employeeId} and date {date}",
+            "Attendance"
+        );
     }
 
     /// <summary>
@@ -270,16 +201,10 @@ public class AttendanceController : ControllerBase
         [FromQuery] int year, 
         [FromQuery] int month)
     {
-        try
-        {
-            var attendance = await _attendanceService.GetAttendanceByMonthAsync(employeeId, year, month);
-            return Ok(attendance);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting attendance records by month for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting attendance records by month" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _attendanceService.GetAttendanceByMonthAsync(employeeId, year, month),
+            $"getting attendance records by month for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -288,16 +213,10 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}/total-hours")]
     public async Task<ActionResult<TimeSpan>> GetTotalHours(int employeeId, [FromQuery] DateTime startDate, [FromQuery] DateTime endDate)
     {
-        try
-        {
-            var totalHours = await _attendanceService.GetTotalHoursAsync(employeeId, startDate, endDate);
-            return Ok(new { totalHours });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting total hours for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting total hours" });
-        }
+        return await HandleServiceResultAsync(
+            async () => await _attendanceService.GetTotalHoursAsync(employeeId, startDate, endDate),
+            $"getting total hours for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -306,16 +225,10 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}/overtime-hours")]
     public async Task<ActionResult<TimeSpan>> GetOvertimeHours(int employeeId, [FromQuery] DateTime startDate, [FromQuery] DateTime endDate)
     {
-        try
-        {
-            var overtimeHours = await _attendanceService.GetOvertimeHoursAsync(employeeId, startDate, endDate);
-            return Ok(new { overtimeHours });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting overtime hours for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting overtime hours" });
-        }
+        return await HandleServiceResultAsync(
+            async () => await _attendanceService.GetOvertimeHoursAsync(employeeId, startDate, endDate),
+            $"getting overtime hours for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -324,16 +237,10 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}/has-clock-in")]
     public async Task<ActionResult<bool>> HasClockIn(int employeeId, [FromQuery] DateTime date)
     {
-        try
-        {
-            var hasClockIn = await _attendanceService.HasClockInAsync(employeeId, date);
-            return Ok(new { hasClockIn });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while checking clock in status for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while checking clock in status" });
-        }
+        return await HandleServiceResultAsync(
+            async () => await _attendanceService.HasClockInAsync(employeeId, date),
+            $"checking clock in status for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -342,15 +249,9 @@ public class AttendanceController : ControllerBase
     [HttpGet("employee/{employeeId}/has-clock-out")]
     public async Task<ActionResult<bool>> HasClockOut(int employeeId, [FromQuery] DateTime date)
     {
-        try
-        {
-            var hasClockOut = await _attendanceService.HasClockOutAsync(employeeId, date);
-            return Ok(new { hasClockOut });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while checking clock out status for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while checking clock out status" });
-        }
+        return await HandleServiceResultAsync(
+            async () => await _attendanceService.HasClockOutAsync(employeeId, date),
+            $"checking clock out status for employee ID {employeeId}"
+        );
     }
 }

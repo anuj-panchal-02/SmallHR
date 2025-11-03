@@ -4,7 +4,7 @@ namespace SmallHR.Core.Interfaces;
 
 public interface ILeaveRequestService : IService
 {
-    Task<IEnumerable<LeaveRequestDto>> GetAllLeaveRequestsAsync();
+    Task<IEnumerable<LeaveRequestDto>> GetAllLeaveRequestsAsync(string? tenantId = null);
     Task<LeaveRequestDto?> GetLeaveRequestByIdAsync(int id);
     Task<IEnumerable<LeaveRequestDto>> GetLeaveRequestsByEmployeeIdAsync(int employeeId);
     Task<LeaveRequestDto> CreateLeaveRequestAsync(CreateLeaveRequestDto createLeaveRequestDto);

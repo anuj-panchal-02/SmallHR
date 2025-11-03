@@ -122,6 +122,7 @@ export interface EmployeeSearchRequest {
   pageSize?: number;
   sortBy?: string;
   sortDirection?: string;
+  tenantId?: string;
 }
 
 export interface PagedResponse<T> {

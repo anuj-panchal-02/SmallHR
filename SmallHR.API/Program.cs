@@ -68,7 +68,11 @@ builder.Services.AddDbContext<ApplicationDbContext>((sp, options) =>
         throw new InvalidOperationException("ITenantProvider must be registered and cannot be null");
     }
     var conn = resolver.GetConnectionString(tenantProvider.TenantId);
-    options.UseSqlServer(conn);
+    options.UseSqlServer(conn, sqlOptions =>
+    {
+        // Increase command timeout to prevent timeouts on complex queries (default is 30 seconds)
+        sqlOptions.CommandTimeout(60); // 60 seconds
+    });
     // IServiceProvider is injected via constructor to get HttpContextAccessor for SuperAdmin detection
 }, ServiceLifetime.Scoped);
 builder.Services.AddHttpContextAccessor();
@@ -154,6 +158,10 @@ builder.Services.AddAutoMapper(typeof(MappingProfile));
 
 // Repository pattern
 builder.Services.AddScoped(typeof(IGenericRepository<>), typeof(GenericRepository<>));
+// ISP: register segregated repository interfaces for consumers that only need read/write/bulk
+builder.Services.AddScoped(typeof(IReadRepository<>), typeof(GenericRepository<>));
+builder.Services.AddScoped(typeof(IWriteRepository<>), typeof(GenericRepository<>));
+builder.Services.AddScoped(typeof(IBulkWriteRepository<>), typeof(GenericRepository<>));
 builder.Services.AddScoped<IEmployeeRepository, EmployeeRepository>();
 builder.Services.AddScoped<ILeaveRequestRepository, LeaveRequestRepository>();
 builder.Services.AddScoped<IAttendanceRepository, AttendanceRepository>();
@@ -161,6 +169,8 @@ builder.Services.AddScoped<IDepartmentRepository, DepartmentRepository>();
 builder.Services.AddScoped<IPositionRepository, PositionRepository>();
 
 // Services
+builder.Services.AddScoped<IUserCreationService, UserCreationService>();
+builder.Services.AddScoped<IDataSeedingService, DataSeedingService>();
 builder.Services.AddScoped<IEmployeeService, EmployeeService>();
 builder.Services.AddScoped<ILeaveRequestService, LeaveRequestService>();
 builder.Services.AddScoped<IAttendanceService, AttendanceService>();
@@ -174,6 +184,11 @@ builder.Services.AddScoped<IUsageMetricsService, SmallHR.Infrastructure.Services
 builder.Services.AddScoped<ITenantLifecycleService, SmallHR.Infrastructure.Services.TenantLifecycleService>();
 builder.Services.AddScoped<IAdminAuditService, SmallHR.Infrastructure.Services.AdminAuditService>();
 builder.Services.AddScoped<IAlertService, SmallHR.Infrastructure.Services.AlertService>();
+builder.Services.AddScoped<ITenantFilterService, SmallHR.Infrastructure.Services.TenantFilterService>();
+
+// Permission Service - centralized permission checks (follows Open/Closed Principle)
+builder.Services.AddScoped<IPermissionService, SmallHR.Infrastructure.Services.PermissionService>();
+builder.Services.AddScoped<IUsageMetricsRepository, SmallHR.Infrastructure.Repositories.UsageMetricsRepository>();
 
 // Webhook handlers
 builder.Services.AddScoped<StripeWebhookHandler>();
@@ -181,6 +196,49 @@ builder.Services.AddScoped<StripeWebhookHandler>();
 // Authorization: Permission-based
 builder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
 builder.Services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
+
+// Sort Strategy Pattern (follows Open/Closed Principle)
+// Employee sort strategies
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeFirstNameSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeLastNameSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeEmailSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeEmployeeIdSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeDepartmentSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeePositionSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeHireDateSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeSalarySortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.EmployeeCreatedAtSortStrategy>();
+builder.Services.AddScoped<ISortStrategyFactory<SmallHR.Core.Entities.Employee>>(sp =>
+{
+    ISortStrategy<SmallHR.Core.Entities.Employee>[] strategies = new ISortStrategy<SmallHR.Core.Entities.Employee>[]
+    {
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeFirstNameSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeLastNameSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeEmailSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeEmployeeIdSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeDepartmentSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeePositionSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeHireDateSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeSalarySortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.EmployeeCreatedAtSortStrategy>()
+    };
+    return new SmallHR.Infrastructure.Sorting.EmployeeSortStrategyFactory(strategies);
+});
+
+// Tenant sort strategies
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.TenantNameSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.TenantCreatedAtSortStrategy>();
+builder.Services.AddScoped<SmallHR.Infrastructure.Sorting.TenantStatusSortStrategy>();
+builder.Services.AddScoped<ISortStrategyFactory<SmallHR.Core.Entities.Tenant>>(sp =>
+{
+    ISortStrategy<SmallHR.Core.Entities.Tenant>[] strategies = new ISortStrategy<SmallHR.Core.Entities.Tenant>[]
+    {
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.TenantNameSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.TenantCreatedAtSortStrategy>(),
+        sp.GetRequiredService<SmallHR.Infrastructure.Sorting.TenantStatusSortStrategy>()
+    };
+    return new SmallHR.Infrastructure.Sorting.TenantSortStrategyFactory(strategies);
+});
 
 // Rate limiting configuration
 builder.Services.AddMemoryCache();
@@ -257,6 +315,9 @@ app.UseAuthorization();
 
 // Admin audit middleware (must be after authorization to access user claims)
 app.UseMiddleware<AdminAuditMiddleware>();
+
+// API usage metrics (increment per successful request)
+app.UseMiddleware<ApiUsageMetricsMiddleware>();
 
 app.MapControllers();
 
@@ -409,7 +470,7 @@ if (app.Environment.IsDevelopment())
     });
     
     // Full database reset (drops and recreates database, keeps only 1 SuperAdmin)
-    app.MapPost("/api/dev/reset-database", async (ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger<Program> logger) =>
+    app.MapPost("/api/dev/reset-database", async (ApplicationDbContext context, IDataSeedingService dataSeedingService, ILogger<Program> logger) =>
     {
         try
         {
@@ -421,7 +482,7 @@ if (app.Environment.IsDevelopment())
             await context.Database.MigrateAsync();
             
             // Re-seed with clean data (roles + 1 SuperAdmin only)
-            await SeedDataAsync(context, userManager, roleManager, logger);
+            await SeedDataAsync(dataSeedingService, logger);
             
             return Results.Ok(new { 
                 message = "Database reset and re-seeded successfully. Only 1 SuperAdmin user exists.",
@@ -436,7 +497,7 @@ if (app.Environment.IsDevelopment())
     });
     
     // Clean all data but keep roles and 1 SuperAdmin (without dropping database)
-    app.MapPost("/api/dev/clean-all-data", async (ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger<Program> logger) =>
+    app.MapPost("/api/dev/clean-all-data", async (ApplicationDbContext context, UserManager<User> userManager, IDataSeedingService dataSeedingService, ILogger<Program> logger) =>
     {
         try
         {
@@ -527,7 +588,7 @@ if (app.Environment.IsDevelopment())
             }
             
             // Ensure only 1 SuperAdmin exists
-            await SeedDataAsync(context, userManager, roleManager, logger);
+            await SeedDataAsync(dataSeedingService, logger);
             
             return Results.Ok(new { 
                 message = "All data cleaned successfully. Only 1 SuperAdmin user and roles remain.",
@@ -548,12 +609,10 @@ using (var scope = app.Services.CreateScope())
     var services = scope.ServiceProvider;
     try
     {
-        var context = services.GetRequiredService<ApplicationDbContext>();
-        var userManager = services.GetRequiredService<UserManager<User>>();
-        var roleManager = services.GetRequiredService<RoleManager<IdentityRole>>();
+        var dataSeedingService = services.GetRequiredService<IDataSeedingService>();
         var logger = services.GetRequiredService<ILogger<Program>>();
         
-        await SeedDataAsync(context, userManager, roleManager, logger);
+        await SeedDataAsync(dataSeedingService, logger);
     }
     catch (Exception ex)
     {
@@ -565,95 +624,22 @@ using (var scope = app.Services.CreateScope())
 app.Run();
 
 // Seed data method - Minimal setup: Only roles and 1 SuperAdmin
-static async Task SeedDataAsync(ApplicationDbContext context, UserManager<User> userManager, RoleManager<IdentityRole> roleManager, ILogger logger)
+static async Task SeedDataAsync(IDataSeedingService dataSeedingService, ILogger logger)
 {
-    // Create roles only - essential for the system
-    if (!await roleManager.RoleExistsAsync("SuperAdmin"))
-    {
-        await roleManager.CreateAsync(new IdentityRole("SuperAdmin"));
-    }
+    const string superAdminEmail = "superadmin@smallhr.com";
     
-    if (!await roleManager.RoleExistsAsync("Admin"))
-    {
-        await roleManager.CreateAsync(new IdentityRole("Admin"));
-    }
+    logger.LogInformation("Starting data seeding...");
     
-    if (!await roleManager.RoleExistsAsync("HR"))
-    {
-        await roleManager.CreateAsync(new IdentityRole("HR"));
-    }
+    // Seed roles
+    await dataSeedingService.SeedRolesAsync();
     
-    if (!await roleManager.RoleExistsAsync("Employee"))
-    {
-        await roleManager.CreateAsync(new IdentityRole("Employee"));
-    }
-
-    // Delete all existing users except SuperAdmin (to ensure only 1 SuperAdmin exists)
-    var superAdminEmail = "superadmin@smallhr.com";
-    var allUsers = userManager.Users.ToList();
-    foreach (var user in allUsers)
-    {
-        if (user.Email == null || !user.Email.Equals(superAdminEmail, StringComparison.OrdinalIgnoreCase))
-        {
-            await userManager.DeleteAsync(user);
-            logger.LogInformation("Deleted user: {Email}", user.Email);
-        }
-    }
-
-    // Delete duplicate SuperAdmin users (keep only one)
-    var allSuperAdmins = await userManager.GetUsersInRoleAsync("SuperAdmin");
-    if (allSuperAdmins.Count > 1)
-    {
-        // Keep the first one, delete the rest
-        var superAdminToKeep = allSuperAdmins.FirstOrDefault(u => u.Email != null && u.Email.Equals(superAdminEmail, StringComparison.OrdinalIgnoreCase))
-            ?? allSuperAdmins.First();
-        
-        foreach (var admin in allSuperAdmins)
-        {
-            if (admin.Id != superAdminToKeep.Id)
-            {
-                await userManager.DeleteAsync(admin);
-                logger.LogInformation("Deleted duplicate SuperAdmin: {Email}", admin.Email);
-            }
-        }
-    }
-
-    // Create or update SuperAdmin user (ensure only 1 exists)
-    var superAdminUser = await userManager.FindByEmailAsync(superAdminEmail);
-    if (superAdminUser == null)
-    {
-        superAdminUser = new User
-        {
-            UserName = superAdminEmail,
-            Email = superAdminEmail,
-            FirstName = "Super",
-            LastName = "Admin",
-            DateOfBirth = new DateTime(1985, 1, 1),
-            IsActive = true,
-            TenantId = null // SuperAdmin operates at platform layer, no tenant association
-        };
-        
-        await userManager.CreateAsync(superAdminUser, "SuperAdmin@123");
-        await userManager.AddToRoleAsync(superAdminUser, "SuperAdmin");
-        logger.LogInformation("Created SuperAdmin user: {Email}", superAdminEmail);
-    }
-    else
-    {
-        // Ensure existing SuperAdmin has TenantId = null and correct role
-        if (superAdminUser.TenantId != null)
-        {
-            superAdminUser.TenantId = null;
-            await userManager.UpdateAsync(superAdminUser);
-            logger.LogInformation("Updated existing SuperAdmin user to have TenantId = null");
-        }
-        
-        // Ensure SuperAdmin role is assigned
-        if (!await userManager.IsInRoleAsync(superAdminUser, "SuperAdmin"))
-        {
-            await userManager.AddToRoleAsync(superAdminUser, "SuperAdmin");
-            logger.LogInformation("Assigned SuperAdmin role to existing user: {Email}", superAdminEmail);
-        }
-    }
+    // Cleanup users (keep only SuperAdmin)
+    await dataSeedingService.CleanupUsersAsync(superAdminEmail);
+    
+    // Ensure SuperAdmin exists
+    await dataSeedingService.EnsureSuperAdminExistsAsync(superAdminEmail);
+    
+    logger.LogInformation("Data seeding completed successfully");
 }
 
 // Seed demo users for all roles (Development only)

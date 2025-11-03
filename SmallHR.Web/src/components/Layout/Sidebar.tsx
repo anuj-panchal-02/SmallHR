@@ -157,6 +157,15 @@ export default function Sidebar({ collapsed }: SidebarProps) {
       });
     }
     
+    if (canAccessPage('/admin/usage')) {
+      items.push({
+        key: '/admin/usage',
+        icon: <BarChartOutlined />,
+        label: 'Usage Dashboard',
+        path: '/admin/usage',
+      });
+    }
+    
     if (canAccessPage('/role-permissions')) {
       items.push({
         key: '/role-permissions',

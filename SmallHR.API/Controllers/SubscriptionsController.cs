@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.DTOs.Subscription;
 using SmallHR.Core.Interfaces;
 
@@ -8,17 +10,15 @@ namespace SmallHR.API.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
-public class SubscriptionsController : ControllerBase
+public class SubscriptionsController : BaseApiController
 {
     private readonly ISubscriptionService _subscriptionService;
-    private readonly ILogger<SubscriptionsController> _logger;
 
     public SubscriptionsController(
         ISubscriptionService subscriptionService,
-        ILogger<SubscriptionsController> logger)
+        ILogger<SubscriptionsController> logger) : base(logger)
     {
         _subscriptionService = subscriptionService;
-        _logger = logger;
     }
 
     /// <summary>
@@ -36,96 +36,111 @@ public class SubscriptionsController : ControllerBase
     /// Get subscription by ID (Admin only)
     /// </summary>
     [HttpGet("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<SubscriptionDto>> GetSubscription(int id)
     {
-        var subscription = await _subscriptionService.GetSubscriptionByIdAsync(id);
-        if (subscription == null)
-            return NotFound();
-
-        return Ok(subscription);
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _subscriptionService.GetSubscriptionByIdAsync(id),
+            $"getting subscription with ID {id}",
+            "Subscription"
+        );
     }
 
     /// <summary>
     /// Get subscription by tenant ID (Admin only)
     /// </summary>
     [HttpGet("tenant/{tenantId}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<SubscriptionDto>> GetSubscriptionByTenant(int tenantId)
     {
-        var subscription = await _subscriptionService.GetSubscriptionByTenantIdAsync(tenantId);
-        if (subscription == null)
-            return NotFound();
-
-        return Ok(subscription);
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _subscriptionService.GetSubscriptionByTenantIdAsync(tenantId),
+            $"getting subscription for tenant {tenantId}",
+            "Subscription"
+        );
     }
 
     /// <summary>
     /// Create new subscription (SuperAdmin only)
     /// </summary>
     [HttpPost]
-    [Authorize(Roles = "SuperAdmin")]
+    [AuthorizeSuperAdmin]
     public async Task<ActionResult<SubscriptionDto>> CreateSubscription(CreateSubscriptionRequest request)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            var subscription = await _subscriptionService.CreateSubscriptionAsync(request);
-            return CreatedAtAction(nameof(GetSubscription), new { id = subscription.Id }, subscription);
+            return BadRequest(ModelState);
         }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(new { message = ex.Message });
-        }
+
+        return await HandleCreateResultAsync(
+            () => _subscriptionService.CreateSubscriptionAsync(request),
+            nameof(GetSubscription),
+            (s) => s.Id,
+            "creating subscription"
+        );
     }
 
     /// <summary>
     /// Update subscription (Admin/SuperAdmin only)
     /// </summary>
     [HttpPut("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<SubscriptionDto>> UpdateSubscription(int id, UpdateSubscriptionRequest request)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            var subscription = await _subscriptionService.UpdateSubscriptionAsync(id, request);
-            return Ok(subscription);
+            return BadRequest(ModelState);
         }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+
+        return await HandleUpdateResultAsync(
+            async () => await _subscriptionService.GetSubscriptionByIdAsync(id) != null,
+            async () => await _subscriptionService.UpdateSubscriptionAsync(id, request),
+            id,
+            "updating subscription",
+            "Subscription"
+        );
     }
 
     /// <summary>
     /// Cancel subscription
     /// </summary>
     [HttpPost("{id}/cancel")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
-    public async Task<ActionResult> CancelSubscription(int id, [FromQuery] string? reason = null)
+    [AuthorizeAdmin]
+    public async Task<ActionResult<object>> CancelSubscription(int id, [FromQuery] string? reason = null)
     {
-        var result = await _subscriptionService.CancelSubscriptionAsync(id, reason);
-        if (!result)
-            return NotFound();
-
-        return Ok(new { message = "Subscription canceled successfully" });
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var result = await _subscriptionService.CancelSubscriptionAsync(id, reason);
+                if (!result)
+                {
+                    throw new KeyNotFoundException("Subscription not found");
+                }
+                return new { message = "Subscription canceled successfully" };
+            },
+            "canceling subscription"
+        );
     }
 
     /// <summary>
     /// Reactivate subscription
     /// </summary>
     [HttpPost("{id}/reactivate")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
-    public async Task<ActionResult> ReactivateSubscription(int id)
+    [AuthorizeAdmin]
+    public async Task<ActionResult<object>> ReactivateSubscription(int id)
     {
-        var result = await _subscriptionService.ReactivateSubscriptionAsync(id);
-        if (!result)
-            return NotFound();
-
-        return Ok(new { message = "Subscription reactivated successfully" });
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var result = await _subscriptionService.ReactivateSubscriptionAsync(id);
+                if (!result)
+                {
+                    throw new KeyNotFoundException("Subscription not found");
+                }
+                return new { message = "Subscription reactivated successfully" };
+            },
+            "reactivating subscription"
+        );
     }
 
     /// <summary>
@@ -135,8 +150,10 @@ public class SubscriptionsController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult<List<SubscriptionPlanDto>>> GetPlans()
     {
-        var plans = await _subscriptionService.GetAvailablePlansAsync();
-        return Ok(plans);
+        return await HandleServiceResultAsync(
+            () => _subscriptionService.GetAvailablePlansAsync(),
+            "getting subscription plans"
+        );
     }
 
     /// <summary>
@@ -146,11 +163,11 @@ public class SubscriptionsController : ControllerBase
     [AllowAnonymous]
     public async Task<ActionResult<SubscriptionPlanDto>> GetPlan(int id)
     {
-        var plan = await _subscriptionService.GetPlanByIdAsync(id);
-        if (plan == null)
-            return NotFound();
-
-        return Ok(plan);
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _subscriptionService.GetPlanByIdAsync(id),
+            $"getting subscription plan with ID {id}",
+            "SubscriptionPlan"
+        );
     }
 
     /// <summary>

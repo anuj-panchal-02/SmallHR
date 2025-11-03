@@ -4,7 +4,7 @@ namespace SmallHR.Core.Interfaces;
 
 public interface IDepartmentService : IService
 {
-    Task<IEnumerable<DepartmentDto>> GetAllDepartmentsAsync();
+    Task<IEnumerable<DepartmentDto>> GetAllDepartmentsAsync(string? tenantId = null);
     Task<DepartmentDto?> GetDepartmentByIdAsync(int id);
     Task<DepartmentDto> CreateDepartmentAsync(CreateDepartmentDto createDepartmentDto);
     Task<DepartmentDto?> UpdateDepartmentAsync(int id, UpdateDepartmentDto updateDepartmentDto);

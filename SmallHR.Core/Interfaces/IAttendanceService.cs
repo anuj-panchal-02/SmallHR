@@ -4,7 +4,7 @@ namespace SmallHR.Core.Interfaces;
 
 public interface IAttendanceService : IService
 {
-    Task<IEnumerable<AttendanceDto>> GetAllAttendanceAsync();
+    Task<IEnumerable<AttendanceDto>> GetAllAttendanceAsync(string? tenantId = null);
     Task<AttendanceDto?> GetAttendanceByIdAsync(int id);
     Task<IEnumerable<AttendanceDto>> GetAttendanceByEmployeeIdAsync(int employeeId);
     Task<AttendanceDto> CreateAttendanceAsync(CreateAttendanceDto createAttendanceDto);

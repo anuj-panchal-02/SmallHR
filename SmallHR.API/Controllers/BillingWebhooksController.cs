@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
 using SmallHR.API.Services;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
@@ -14,20 +15,18 @@ namespace SmallHR.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/webhooks/[controller]")]
-public class BillingWebhooksController : ControllerBase
+public class BillingWebhooksController : BaseApiController
 {
     private readonly StripeWebhookHandler _stripeWebhookHandler;
     private readonly ApplicationDbContext _context;
-    private readonly ILogger<BillingWebhooksController> _logger;
 
     public BillingWebhooksController(
         StripeWebhookHandler stripeWebhookHandler,
         ApplicationDbContext context,
-        ILogger<BillingWebhooksController> logger)
+        ILogger<BillingWebhooksController> logger) : base(logger)
     {
         _stripeWebhookHandler = stripeWebhookHandler;
         _context = context;
-        _logger = logger;
     }
 
     /// <summary>
@@ -41,7 +40,7 @@ public class BillingWebhooksController : ControllerBase
     /// before processing. The Processed flag is updated after successful processing.
     /// </summary>
     [HttpPost("stripe")]
-    public async Task<IActionResult> StripeWebhook()
+    public async Task<ActionResult<object>> StripeWebhook()
     {
         try
         {
@@ -59,26 +58,26 @@ public class BillingWebhooksController : ControllerBase
 
             if (result)
             {
-                _logger.LogInformation("Stripe webhook processed successfully. Event saved to database.");
+                Logger.LogInformation("Stripe webhook processed successfully. Event saved to database.");
                 return Ok(new { received = true, message = "Webhook processed successfully" });
             }
 
-            _logger.LogWarning("Stripe webhook processing failed. Event saved to database but not processed.");
-            return BadRequest(new { message = "Failed to process webhook" });
+            Logger.LogWarning("Stripe webhook processing failed. Event saved to database but not processed.");
+            return CreateBadRequestResponse("Failed to process webhook");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing Stripe webhook: {Message}", ex.Message);
+            Logger.LogError(ex, "Error processing Stripe webhook: {Message}", ex.Message);
             
             // In development, return 200 to avoid webhook retries from Stripe
             var environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
             if (environment == "Development")
             {
-                _logger.LogWarning("Development mode: Returning success despite error to prevent webhook retries");
+                Logger.LogWarning("Development mode: Returning success despite error to prevent webhook retries");
                 return Ok(new { received = true, warning = "Development mode: Webhook not fully processed" });
             }
             
-            return StatusCode(500, new { message = "Internal server error processing webhook" });
+            return CreateErrorResponse("Internal server error processing webhook", ex);
         }
     }
 
@@ -93,7 +92,7 @@ public class BillingWebhooksController : ControllerBase
     /// - Store error messages if processing fails
     /// </summary>
     [HttpPost("paddle")]
-    public async Task<IActionResult> PaddleWebhook()
+    public async Task<ActionResult<object>> PaddleWebhook()
     {
         try
         {
@@ -121,21 +120,21 @@ public class BillingWebhooksController : ControllerBase
                 await _context.WebhookEvents.AddAsync(webhookEvent);
                 await _context.SaveChangesAsync();
 
-                _logger.LogInformation("Paddle webhook received and saved to database (ID: {WebhookEventId}). Handler not yet implemented.", 
+                Logger.LogInformation("Paddle webhook received and saved to database (ID: {WebhookEventId}). Handler not yet implemented.", 
                     webhookEvent.Id);
             }
             catch (Exception saveEx)
             {
-                _logger.LogError(saveEx, "Failed to save Paddle webhook event to database");
+                Logger.LogError(saveEx, "Failed to save Paddle webhook event to database");
             }
 
             // Paddle webhook handler implementation would go here
-            _logger.LogInformation("Paddle webhook received - handler not yet implemented");
+            Logger.LogInformation("Paddle webhook received - handler not yet implemented");
             return Ok(new { received = true, message = "Paddle webhook handler not implemented" });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing Paddle webhook: {Message}", ex.Message);
+            Logger.LogError(ex, "Error processing Paddle webhook: {Message}", ex.Message);
             
             var environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
             if (environment == "Development")
@@ -143,7 +142,7 @@ public class BillingWebhooksController : ControllerBase
                 return Ok(new { received = true, warning = "Development mode: Paddle webhook not processed" });
             }
             
-            return StatusCode(500, new { message = "Internal server error processing Paddle webhook" });
+            return CreateErrorResponse("Internal server error processing Paddle webhook", ex);
         }
     }
 }

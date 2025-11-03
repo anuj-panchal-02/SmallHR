@@ -15,8 +15,7 @@ public class EmployeeService : IEmployeeService
     private readonly IEmployeeRepository _employeeRepository;
     private readonly IMapper _mapper;
     private readonly ITenantProvider _tenantProvider;
-    private readonly UserManager<User> _userManager;
-    private readonly RoleManager<IdentityRole> _roleManager;
+    private readonly IUserCreationService _userCreationService;
     private readonly ILogger<EmployeeService> _logger;
     private readonly ApplicationDbContext _context;
 
@@ -24,16 +23,14 @@ public class EmployeeService : IEmployeeService
         IEmployeeRepository employeeRepository, 
         IMapper mapper, 
         ITenantProvider tenantProvider,
-        UserManager<User> userManager,
-        RoleManager<IdentityRole> roleManager,
+        IUserCreationService userCreationService,
         ILogger<EmployeeService> logger,
         ApplicationDbContext context)
     {
         _employeeRepository = employeeRepository;
         _mapper = mapper;
         _tenantProvider = tenantProvider;
-        _userManager = userManager;
-        _roleManager = roleManager;
+        _userCreationService = userCreationService;
         _logger = logger;
         _context = context;
     }
@@ -70,131 +67,39 @@ public class EmployeeService : IEmployeeService
         await CheckSubscriptionLimitAsync();
         
         var employee = _mapper.Map<Employee>(createEmployeeDto);
-        bool userCreatedOrLinked = false;
         
-        // Create user automatically for the employee
+        // Create or link user automatically for the employee
+        User? user = null;
         try
         {
             // Check if user already exists with this email
-            var existingUser = await _userManager.FindByEmailAsync(createEmployeeDto.Email);
-            if (existingUser != null)
+            user = await _userCreationService.LinkExistingUserAsync(createEmployeeDto.Email, createEmployeeDto.EmployeeId);
+            
+            if (user == null)
             {
-                // Link existing user to employee
-                employee.UserId = existingUser.Id;
-                userCreatedOrLinked = true;
-                _logger.LogInformation("Linked existing user {Email} (ID: {UserId}) to employee {EmployeeId}", 
-                    createEmployeeDto.Email, existingUser.Id, createEmployeeDto.EmployeeId);
+                // Create new user with role assignment
+                user = await _userCreationService.CreateUserForEmployeeAsync(createEmployeeDto);
             }
-            else
+            
+            // Link user to employee by setting UserId foreign key
+            if (user != null)
             {
-                // Validate role exists
-                var roleExists = await _roleManager.RoleExistsAsync(createEmployeeDto.Role);
-                if (!roleExists)
-                {
-                    _logger.LogWarning("Role {Role} does not exist for employee {EmployeeId}, defaulting to Employee", createEmployeeDto.Role, createEmployeeDto.EmployeeId);
-                    createEmployeeDto.Role = "Employee"; // Default to Employee role if invalid
-                }
-
-                // Generate a simple password
-                var password = GenerateSimplePassword(createEmployeeDto.Email, createEmployeeDto.EmployeeId);
-                _logger.LogInformation("Generated password for user {Email}: Length={Length}, Format=Welcome@{EmployeeId}123!", 
-                    createEmployeeDto.Email, password.Length, createEmployeeDto.EmployeeId);
-                _logger.LogWarning("USER PASSWORD INFO - Email: {Email}, EmployeeId: {EmployeeId}, Password: {Password}", 
-                    createEmployeeDto.Email, createEmployeeDto.EmployeeId, password);
-
-                // Create new user
-                var user = new User
-                {
-                    UserName = createEmployeeDto.Email,
-                    Email = createEmployeeDto.Email,
-                    FirstName = createEmployeeDto.FirstName,
-                    LastName = createEmployeeDto.LastName,
-                    DateOfBirth = createEmployeeDto.DateOfBirth,
-                    IsActive = true,
-                    CreatedAt = DateTime.UtcNow
-                };
-
-                _logger.LogInformation("Attempting to create user in AspNetUsers: Email={Email}, UserName={UserName}, FirstName={FirstName}, LastName={LastName}, DateOfBirth={DateOfBirth}", 
-                    user.Email, user.UserName, user.FirstName, user.LastName, user.DateOfBirth);
-
-                var userResult = await _userManager.CreateAsync(user, password);
-                
-                _logger.LogInformation("UserManager.CreateAsync completed. Succeeded={Succeeded}, Errors={ErrorCount}", 
-                    userResult.Succeeded, userResult.Errors?.Count() ?? 0);
-                
-                if (userResult.Succeeded)
-                {
-                    // UserManager.CreateAsync automatically saves to AspNetUsers table
-                    // The user.Id is now populated with the database-generated ID
-                    _logger.LogInformation("User created successfully with ID: {UserId}", user.Id);
-                    
-                    // Verify user was actually saved by fetching it
-                    var createdUser = await _userManager.FindByEmailAsync(createEmployeeDto.Email);
-                    if (createdUser == null)
-                    {
-                        _logger.LogError("CRITICAL: User creation succeeded but user not found in database for email {Email}. UserId was: {UserId}", 
-                            createEmployeeDto.Email, user.Id);
-                        throw new InvalidOperationException($"User creation succeeded but user not found in database for {createEmployeeDto.Email}");
-                    }
-                    
-                    _logger.LogInformation("Verified user exists in AspNetUsers table: Email={Email}, Id={UserId}", 
-                        createdUser.Email, createdUser.Id);
-                    
-                    // Assign role to user (this adds entry to AspNetUserRoles table)
-                    var roleResult = await _userManager.AddToRoleAsync(createdUser, createEmployeeDto.Role);
-                    if (!roleResult.Succeeded)
-                    {
-                        var roleErrors = string.Join(", ", roleResult.Errors.Select(e => e.Description));
-                        _logger.LogError("Failed to assign role {Role} to user {Email}: {Errors}", 
-                            createEmployeeDto.Role, createEmployeeDto.Email, roleErrors);
-                        throw new InvalidOperationException($"Failed to assign role {createEmployeeDto.Role} to user {createEmployeeDto.Email}: {roleErrors}");
-                    }
-                    
-                    _logger.LogInformation("Role {Role} assigned to user {Email} (ID: {UserId}). User is in AspNetUsers table.", 
-                        createEmployeeDto.Role, createEmployeeDto.Email, createdUser.Id);
-                    
-                    // Link user to employee by setting UserId foreign key
-                    employee.UserId = createdUser.Id;
-                    userCreatedOrLinked = true;
-                    
-                    _logger.LogInformation("SUCCESS: User {Email} (ID: {UserId}) created in AspNetUsers table with role {Role} for employee {EmployeeId}", 
-                        createEmployeeDto.Email, createdUser.Id, createEmployeeDto.Role, createEmployeeDto.EmployeeId);
-                    _logger.LogWarning("LOGIN CREDENTIALS - Email: {Email}, Password: Welcome@{EmployeeId}123!, Please use this password to login", 
-                        createEmployeeDto.Email, createEmployeeDto.EmployeeId);
-                }
-                else
-                {
-                    var errors = string.Join(", ", userResult.Errors.Select(e => $"{e.Code}: {e.Description}"));
-                    _logger.LogError("Failed to create user for employee {EmployeeId}: {Errors}. User object: Email={Email}, UserName={UserName}, FirstName={FirstName}, LastName={LastName}", 
-                        createEmployeeDto.EmployeeId, errors, createEmployeeDto.Email, user.UserName, user.FirstName, user.LastName);
-                    
-                    // Log password validation details if available
-                    foreach (var error in userResult.Errors)
-                    {
-                        _logger.LogError("Identity error: Code={Code}, Description={Description}", error.Code, error.Description);
-                    }
-                    
-                    // Throw exception to prevent employee creation if user creation fails
-                    // This ensures data consistency - employee should not exist without user
-                    throw new InvalidOperationException($"Failed to create user for employee {createEmployeeDto.EmployeeId}: {errors}");
-                }
+                employee.UserId = user.Id;
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating user for employee {EmployeeId}: {Message}. StackTrace: {StackTrace}", 
-                createEmployeeDto.EmployeeId, ex.Message, ex.StackTrace);
+            _logger.LogError(ex, "Error creating or linking user for employee {EmployeeId}: {Message}", 
+                createEmployeeDto.EmployeeId, ex.Message);
             
             // Re-throw with more context to help debug - this prevents employee creation
             throw new InvalidOperationException($"Failed to create user for employee {createEmployeeDto.EmployeeId}: {ex.Message}", ex);
         }
 
-        // Only create employee if user was successfully created or linked
-        if (!userCreatedOrLinked || string.IsNullOrEmpty(employee.UserId))
+        // If user was not created/linked, continue without linking but log a warning
+        if (user == null || string.IsNullOrEmpty(employee.UserId))
         {
-            _logger.LogError("CRITICAL: Attempting to create employee {EmployeeId} without a valid user. UserCreatedOrLinked: {UserCreatedOrLinked}, UserId: {UserId}", 
-                createEmployeeDto.EmployeeId, userCreatedOrLinked, employee.UserId ?? "NULL");
-            throw new InvalidOperationException($"Cannot create employee {createEmployeeDto.EmployeeId} without a valid user. User creation failed or was not completed.");
+            _logger.LogWarning("Proceeding to create employee {EmployeeId} without linked user account.", createEmployeeDto.EmployeeId);
         }
 
         await _employeeRepository.AddAsync(employee);
@@ -202,71 +107,6 @@ public class EmployeeService : IEmployeeService
             createEmployeeDto.EmployeeId, employee.UserId);
         
         return _mapper.Map<EmployeeDto>(employee);
-    }
-
-    /// <summary>
-    /// Generates a simple password based on employee ID
-    /// Format: Welcome@{EmployeeId}123!
-    /// Example: Welcome@EMP001123!
-    /// Meets security requirements: 12+ chars, uppercase, lowercase, number, special char
-    /// </summary>
-    private string GenerateSimplePassword(string email, string employeeId)
-    {
-        // Simple password format: Welcome@{EmployeeId}123!
-        // This format guarantees:
-        // - Uppercase: "W" (from "Welcome")
-        // - Lowercase: "elcome" (from "Welcome")
-        // - Numbers: "123"
-        // - Special characters: "@" and "!"
-        // - Minimum 12 characters
-        
-        // Sanitize employeeId to ensure password validity (remove spaces, special chars that might break password)
-        var sanitizedEmployeeId = employeeId
-            .Replace(" ", "")
-            .Replace("@", "")
-            .Replace("!", "")
-            .Replace("#", "")
-            .Replace("$", "")
-            .Replace("%", "")
-            .Replace("^", "")
-            .Replace("&", "")
-            .Replace("*", "")
-            .Replace("(", "")
-            .Replace(")", "")
-            .Replace("-", "")
-            .Replace("_", "")
-            .Replace("=", "")
-            .Replace("+", "");
-        
-        // Generate password: Welcome@{EmployeeId}123!
-        // This format guarantees:
-        // - Uppercase: "W"
-        // - Lowercase: "elcome"
-        // - Numbers: "123"
-        // - Special characters: "@" and "!"
-        // - Minimum 12 characters
-        var password = $"Welcome@{sanitizedEmployeeId}123!";
-        
-        // Ensure minimum 12 characters - if still short, pad with numbers
-        if (password.Length < 12)
-        {
-            var padding = new string('1', 12 - password.Length);
-            password = $"Welcome@{sanitizedEmployeeId}{padding}!";
-        }
-        
-        // Validate password meets all requirements
-        if (password.Length < 12)
-        {
-            throw new InvalidOperationException($"Generated password does not meet minimum length requirement (12 chars). Password length: {password.Length}");
-        }
-        
-        // Truncate if too long (some systems have max length, typically 128 chars)
-        if (password.Length > 128)
-        {
-            password = password.Substring(0, 128);
-        }
-        
-        return password;
     }
 
     public async Task<EmployeeDto?> UpdateEmployeeAsync(int id, UpdateEmployeeDto updateEmployeeDto)
@@ -363,11 +203,22 @@ public class EmployeeService : IEmployeeService
     private async Task CheckSubscriptionLimitAsync()
     {
         // Get current tenant's subscription details
-        // Try to find tenant by Name matching TenantId, or by Domain
+        // TenantId is stored as string (tenant ID as string), so try to parse and match by ID
+        // Also support matching by domain for backward compatibility
+        var tenantIdString = _tenantProvider.TenantId;
+        
+        // Parse tenant ID if possible
+        int? tenantIdInt = null;
+        if (int.TryParse(tenantIdString, out var parsedId))
+        {
+            tenantIdInt = parsedId;
+        }
+        
         var tenant = await _context.Tenants
             .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.Name.ToLower() == _tenantProvider.TenantId.ToLower() || 
-                                      (!string.IsNullOrEmpty(t.Domain) && t.Domain.ToLower() == _tenantProvider.TenantId.ToLower()));
+            .FirstOrDefaultAsync(t => 
+                (tenantIdInt.HasValue && t.Id == tenantIdInt.Value) ||
+                (!string.IsNullOrEmpty(t.Domain) && t.Domain.ToLower() == tenantIdString.ToLower()));
 
         if (tenant == null)
         {

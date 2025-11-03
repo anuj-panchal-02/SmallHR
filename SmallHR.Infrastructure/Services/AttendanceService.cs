@@ -24,9 +24,9 @@ public class AttendanceService : IAttendanceService
         _tenantProvider = tenantProvider;
     }
 
-    public async Task<IEnumerable<AttendanceDto>> GetAllAttendanceAsync()
+    public async Task<IEnumerable<AttendanceDto>> GetAllAttendanceAsync(string? tenantId = null)
     {
-        var attendances = await _attendanceRepository.GetAllAsync();
+        var attendances = await _attendanceRepository.GetAllAsync(tenantId);
         return _mapper.Map<IEnumerable<AttendanceDto>>(attendances);
     }
 

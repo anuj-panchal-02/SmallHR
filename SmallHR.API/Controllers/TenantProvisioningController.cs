@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
 using SmallHR.Infrastructure.Data;
@@ -13,21 +15,19 @@ namespace SmallHR.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin")]
-public class TenantProvisioningController : ControllerBase
+[AuthorizeSuperAdmin]
+public class TenantProvisioningController : BaseApiController
 {
     private readonly ITenantProvisioningService _provisioningService;
     private readonly ApplicationDbContext _context;
-    private readonly ILogger<TenantProvisioningController> _logger;
 
     public TenantProvisioningController(
         ITenantProvisioningService provisioningService,
         ApplicationDbContext context,
-        ILogger<TenantProvisioningController> logger)
+        ILogger<TenantProvisioningController> logger) : base(logger)
     {
         _provisioningService = provisioningService;
         _context = context;
-        _logger = logger;
     }
 
     /// <summary>
@@ -37,62 +37,54 @@ public class TenantProvisioningController : ControllerBase
     /// Note: Tenant must be created first via POST /api/tenants
     /// </summary>
     [HttpPost("{tenantId}")]
-    public async Task<IActionResult> ProvisionTenant(
+    public async Task<ActionResult<object>> ProvisionTenant(
         int tenantId,
         [FromBody] ProvisionTenantRequest? request = null)
     {
-        try
-        {
-            // Get tenant record to retrieve admin info
-            var tenant = await _context.Tenants.FindAsync(tenantId);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = $"Tenant with ID {tenantId} not found" });
-            }
-
-            // Use admin info from tenant record, or from request if provided
-            var adminEmail = request?.AdminEmail ?? tenant.AdminEmail ?? throw new InvalidOperationException("AdminEmail is required");
-            var adminFirstName = request?.AdminFirstName ?? tenant.AdminFirstName ?? "Admin";
-            var adminLastName = request?.AdminLastName ?? tenant.AdminLastName ?? tenant.Name ?? "User";
-            var subscriptionPlanId = request?.SubscriptionPlanId;
-            var startTrial = request?.StartTrial ?? false;
-            
-            var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
-                tenantId,
-                adminEmail,
-                adminFirstName,
-                adminLastName,
-                subscriptionPlanId,
-                startTrial);
-
-            if (success && result != null)
-            {
-                return Ok(new
+                // Get tenant record to retrieve admin info
+                var tenant = await _context.Tenants.FindAsync(tenantId);
+                if (tenant == null)
                 {
-                    message = "Tenant provisioned successfully",
-                    tenantId = result.TenantId,
-                    tenantName = result.TenantName,
-                    subscriptionId = result.SubscriptionId,
-                    adminEmail = result.AdminEmail,
-                    adminUserId = result.AdminUserId,
-                    emailSent = result.EmailSent,
-                    stepsCompleted = result.StepsCompleted
-                });
-            }
+                    throw new KeyNotFoundException($"Tenant with ID {tenantId} not found");
+                }
 
-            return BadRequest(new
-            {
-                message = "Failed to provision tenant",
-                error = errorMessage,
-                tenantId = result?.TenantId,
-                stepsCompleted = result?.StepsCompleted ?? new List<string>()
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error provisioning tenant {TenantId}: {Message}", tenantId, ex.Message);
-            return StatusCode(500, new { message = "Internal server error during provisioning", detail = ex.Message });
-        }
+                // Use admin info from tenant record, or from request if provided
+                var adminEmail = request?.AdminEmail ?? tenant.AdminEmail ?? throw new InvalidOperationException("AdminEmail is required");
+                var adminFirstName = request?.AdminFirstName ?? tenant.AdminFirstName ?? "Admin";
+                var adminLastName = request?.AdminLastName ?? tenant.AdminLastName ?? tenant.Name ?? "User";
+                var subscriptionPlanId = request?.SubscriptionPlanId;
+                var startTrial = request?.StartTrial ?? false;
+                
+                var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
+                    tenantId,
+                    adminEmail,
+                    adminFirstName,
+                    adminLastName,
+                    subscriptionPlanId,
+                    startTrial);
+
+                if (success && result != null)
+                {
+                    return new
+                    {
+                        message = "Tenant provisioned successfully",
+                        tenantId = result.TenantId,
+                        tenantName = result.TenantName,
+                        subscriptionId = result.SubscriptionId,
+                        adminEmail = result.AdminEmail,
+                        adminUserId = result.AdminUserId,
+                        emailSent = result.EmailSent,
+                        stepsCompleted = result.StepsCompleted
+                    };
+                }
+
+                throw new InvalidOperationException(errorMessage ?? "Failed to provision tenant");
+            },
+            "provisioning tenant"
+        );
     }
 
     /// <summary>
@@ -100,60 +92,52 @@ public class TenantProvisioningController : ControllerBase
     /// Use this for immediate provisioning during development
     /// </summary>
     [HttpPost("{tenantId}/sync")]
-    public async Task<IActionResult> ProvisionTenantSync(
+    public async Task<ActionResult<object>> ProvisionTenantSync(
         int tenantId,
         [FromBody] ProvisionTenantRequest? request = null)
     {
-        try
-        {
-            request ??= new ProvisionTenantRequest
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                AdminEmail = "admin@tenant.com",
-                AdminFirstName = "Admin",
-                AdminLastName = "User"
-            };
-
-            if (string.IsNullOrWhiteSpace(request.AdminEmail))
-            {
-                return BadRequest(new { message = "AdminEmail is required" });
-            }
-
-            var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
-                tenantId,
-                request.AdminEmail,
-                request.AdminFirstName ?? "Admin",
-                request.AdminLastName ?? "User",
-                request.SubscriptionPlanId,
-                request.StartTrial ?? false);
-
-            if (success && result != null)
-            {
-                return Ok(new
+                request ??= new ProvisionTenantRequest
                 {
-                    message = "Tenant provisioned successfully",
-                    tenantId = result.TenantId,
-                    tenantName = result.TenantName,
-                    subscriptionId = result.SubscriptionId,
-                    adminEmail = result.AdminEmail,
-                    adminUserId = result.AdminUserId,
-                    emailSent = result.EmailSent,
-                    stepsCompleted = result.StepsCompleted
-                });
-            }
+                    AdminEmail = "admin@tenant.com",
+                    AdminFirstName = "Admin",
+                    AdminLastName = "User"
+                };
 
-            return BadRequest(new
-            {
-                message = "Failed to provision tenant",
-                error = errorMessage,
-                tenantId = result?.TenantId,
-                stepsCompleted = result?.StepsCompleted ?? new List<string>()
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error provisioning tenant {TenantId}: {Message}", tenantId, ex.Message);
-            return StatusCode(500, new { message = "Internal server error during provisioning", detail = ex.Message });
-        }
+                if (string.IsNullOrWhiteSpace(request.AdminEmail))
+                {
+                    throw new ArgumentException("AdminEmail is required");
+                }
+
+                var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
+                    tenantId,
+                    request.AdminEmail,
+                    request.AdminFirstName ?? "Admin",
+                    request.AdminLastName ?? "User",
+                    request.SubscriptionPlanId,
+                    request.StartTrial ?? false);
+
+                if (success && result != null)
+                {
+                    return new
+                    {
+                        message = "Tenant provisioned successfully",
+                        tenantId = result.TenantId,
+                        tenantName = result.TenantName,
+                        subscriptionId = result.SubscriptionId,
+                        adminEmail = result.AdminEmail,
+                        adminUserId = result.AdminUserId,
+                        emailSent = result.EmailSent,
+                        stepsCompleted = result.StepsCompleted
+                    };
+                }
+
+                throw new InvalidOperationException(errorMessage ?? "Failed to provision tenant");
+            },
+            "provisioning tenant synchronously"
+        );
     }
 
     /// <summary>

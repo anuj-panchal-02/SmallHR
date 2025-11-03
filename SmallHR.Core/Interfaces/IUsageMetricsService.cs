@@ -1,4 +1,5 @@
 using SmallHR.Core.Entities;
+using SmallHR.Core.DTOs.UsageMetrics;
 
 namespace SmallHR.Core.Interfaces;
 
@@ -30,6 +31,11 @@ public interface IUsageMetricsService
     // Metrics Summary
     Task<UsageSummaryDto> GetUsageSummaryAsync(int tenantId);
     Task<Dictionary<string, object>> GetUsageBreakdownAsync(int tenantId);
+    
+    // Dashboard Methods
+    Task<DashboardOverviewDto> GetDashboardOverviewAsync(DateTime? startDate = null, DateTime? endDate = null);
+    Task<TenantDashboardDto> GetTenantDashboardAsync(int tenantId);
+    Task<UsageHistoryDto> GetUsageHistoryAsync(int? tenantId, DateTime startDate, DateTime endDate, string granularity);
 }
 
 /// <summary>

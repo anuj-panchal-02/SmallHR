@@ -66,15 +66,20 @@ public class TenantProvisioningService : ITenantProvisioningService
                 return (false, "Tenant not found", null);
             }
 
-            var tenantIdString = tenant.Name?.ToLowerInvariant() ?? tenantId.ToString();
+            // Use tenant ID (int) as string for consistency - not tenant name
+            // This ensures departments/positions seeded during provisioning use the same TenantId format
+            // as departments/positions created manually via API (which use _tenantProvider.TenantId)
+            var tenantIdString = tenantId.ToString();
             
             // Get connection string for tenant (for shared DB, this will be the same as master)
+            // Connection string resolver can handle both tenant ID and tenant name
             var tenantConn = resolver.GetConnectionString(tenantIdString);
             var tenantOpts = new DbContextOptionsBuilder<ApplicationDbContext>()
                 .UseSqlServer(tenantConn)
                 .Options;
             
             // Create tenant provider for tenant-specific operations
+            // Use tenant ID (int) as string for consistency across the system
             var tenantProvider = new ProvisioningTenantProvider(tenantIdString);
             
             await using var tenantCtx = new ApplicationDbContext(tenantOpts, tenantProvider);
@@ -143,17 +148,20 @@ public class TenantProvisioningService : ITenantProvisioningService
                 result.StepsCompleted.Add($"Subscription creation failed: {ex.Message}");
             }
 
-            // Step 3: Seed tenant-specific modules
-            await SeedTenantModulesAsync(tenantCtx, tenantIdString);
-            result.StepsCompleted.Add("Modules seeded");
+            // Step 3-5: Seed tenant data in a transaction for consistency
+            await using (var tx = await tenantCtx.Database.BeginTransactionAsync())
+            {
+                await SeedTenantModulesAsync(tenantCtx, tenantIdString);
+                result.StepsCompleted.Add("Modules seeded");
 
-            // Step 4: Seed tenant-specific departments and positions
-            await SeedTenantDepartmentsAndPositionsAsync(tenantCtx, tenantIdString);
-            result.StepsCompleted.Add("Departments and positions seeded");
+                await SeedTenantDepartmentsAndPositionsAsync(tenantCtx, tenantIdString);
+                result.StepsCompleted.Add("Departments and positions seeded");
 
-            // Step 5: Seed tenant-specific role permissions
-            await SeedTenantRolePermissionsAsync(tenantCtx, tenantIdString);
-            result.StepsCompleted.Add("Role permissions seeded");
+                await SeedTenantRolePermissionsAsync(tenantCtx, tenantIdString);
+                result.StepsCompleted.Add("Role permissions seeded");
+
+                await tx.CommitAsync();
+            }
 
             // Step 6: Create tenant admin user
             (User? adminUser, string passwordToken) = await CreateTenantAdminUserAsync(

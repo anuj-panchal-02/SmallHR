@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.Entities;
 using SmallHR.Infrastructure.Data;
 
@@ -8,39 +10,33 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin")]
-public class TenantsController : ControllerBase
+[AuthorizeSuperAdmin]
+public class TenantsController : BaseApiController
 {
     private readonly ApplicationDbContext _db;
-    private readonly ILogger<TenantsController> _logger;
-    public TenantsController(ApplicationDbContext db, ILogger<TenantsController> logger)
+    
+    public TenantsController(ApplicationDbContext db, ILogger<TenantsController> logger) : base(logger)
     {
         _db = db;
-        _logger = logger;
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAll()
+    public async Task<ActionResult<IEnumerable<Tenant>>> GetAll()
     {
-        try
-        {
-            var tenants = await _db.Tenants.AsNoTracking().OrderBy(t => t.Name).ToListAsync();
-            return Ok(tenants);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error fetching tenants: {Message}", ex.Message);
-            _logger.LogError(ex, "Stack trace: {StackTrace}", ex.StackTrace);
-            return StatusCode(500, new { message = "An error occurred while fetching tenants", detail = ex.Message });
-        }
+        return await HandleCollectionResultAsync(
+            () => Task.FromResult(_db.Tenants.AsNoTracking().OrderBy(t => t.Name).AsEnumerable()),
+            "fetching tenants"
+        );
     }
 
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetById(int id)
+    public async Task<ActionResult<Tenant>> GetById(int id)
     {
-        var tenant = await _db.Tenants.FindAsync(id);
-        if (tenant == null) return NotFound();
-        return Ok(tenant);
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _db.Tenants.FindAsync(id).AsTask(),
+            $"getting tenant with ID {id}",
+            "Tenant"
+        );
     }
 
     public record CreateTenantRequest(
@@ -114,15 +110,12 @@ public class TenantsController : ControllerBase
         _db.Tenants.Add(tenant);
         await _db.SaveChangesAsync();
         
-        // Return 202 Accepted with location header pointing to status endpoint
-        var statusUrl = Url.Action(nameof(GetStatus), new { id = tenant.Id }) 
-            ?? $"/api/tenants/{tenant.Id}/status";
-        
-        return Accepted(new Uri(statusUrl, UriKind.Relative), new 
-        { 
-            id = tenant.Id, 
-            status = tenant.Status.ToString(),
-            statusUrl = statusUrl
+        // Return 201 Created with location header pointing to GET by ID
+        return CreatedAtAction(nameof(GetById), new { id = tenant.Id }, new
+        {
+            id = tenant.Id,
+            name = tenant.Name,
+            status = tenant.Status.ToString()
         });
     }
 
@@ -155,7 +148,7 @@ public class TenantsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error fetching tenant status for tenant {TenantId}: {Message}", id, ex.Message);
+            Logger.LogError(ex, "Error fetching tenant status for tenant {TenantId}: {Message}", id, ex.Message);
             return StatusCode(500, new { message = "An error occurred while fetching tenant status", detail = ex.Message });
         }
     }

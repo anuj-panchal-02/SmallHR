@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
 using SmallHR.Core.DTOs.RolePermission;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
@@ -12,12 +13,15 @@ namespace SmallHR.API.Controllers;
 [Authorize]
 [ApiController]
 [Route("api/[controller]")]
-public class RolePermissionsController : ControllerBase
+public class RolePermissionsController : BaseApiController
 {
     private readonly ApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
 
-    public RolePermissionsController(ApplicationDbContext context, ITenantProvider tenantProvider)
+    public RolePermissionsController(
+        ApplicationDbContext context, 
+        ITenantProvider tenantProvider,
+        ILogger<RolePermissionsController> logger) : base(logger)
     {
         _context = context;
         _tenantProvider = tenantProvider;
@@ -28,21 +32,18 @@ public class RolePermissionsController : ControllerBase
     [HasPermission("/role-permissions", PermissionAction.View)]
     public async Task<ActionResult<IEnumerable<RolePermissionDto>>> GetAllPermissions()
     {
-        // Check if user is SuperAdmin
-        var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
-
+        // Check if user is SuperAdmin - use centralized permission service (follows Open/Closed Principle)
         IQueryable<RolePermission> query = _context.RolePermissions;
 
         // SuperAdmin can see all permissions across all tenants
-        if (isSuperAdmin)
+        if (IsSuperAdmin)
         {
             query = query.IgnoreQueryFilters();
         }
         // Admin and other roles see only their tenant's permissions (via query filter)
 
         // For SuperAdmin, filter to show only Admin role permissions
-        if (isSuperAdmin)
+        if (IsSuperAdmin)
         {
             query = query.Where(p => p.RoleName == "Admin");
         }
@@ -73,20 +74,18 @@ public class RolePermissionsController : ControllerBase
     [HttpGet("my-permissions")]
     public async Task<ActionResult<IEnumerable<RolePermissionDto>>> GetMyPermissions()
     {
-        // Get the user's role from the JWT token claims
-        var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
+        // Get the user's role from the JWT token claims - use centralized permission service (follows Open/Closed Principle)
+        var userRole = CurrentUserRole;
         
         if (string.IsNullOrEmpty(userRole))
         {
-            return BadRequest(new { message = "User role not found in token" });
+            return CreateBadRequestResponse("User role not found in token");
         }
 
         // SuperAdmin always has access to /role-permissions
-        var isSuperAdmin = userRole == "SuperAdmin";
-        
         List<RolePermission> permissions;
 
-        if (isSuperAdmin)
+        if (IsSuperAdmin)
         {
             // SuperAdmin: Get ALL unique page paths from ALL tenants (for menu visibility)
             // This ensures SuperAdmin sees everything, including newly created pages/modules
@@ -222,15 +221,12 @@ public class RolePermissionsController : ControllerBase
     [HasPermission("/role-permissions", PermissionAction.View)]
     public async Task<ActionResult<IEnumerable<RolePermissionDto>>> GetPermissionsByRole(string roleName)
     {
-        // Check if user is SuperAdmin
-        var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
-
+        // Check if user is SuperAdmin - use centralized permission service (follows Open/Closed Principle)
         IQueryable<RolePermission> query = _context.RolePermissions
             .Where(p => p.RoleName == roleName);
 
         // SuperAdmin can see all permissions across all tenants
-        if (isSuperAdmin)
+        if (IsSuperAdmin)
         {
             query = query.IgnoreQueryFilters();
         }
@@ -262,9 +258,10 @@ public class RolePermissionsController : ControllerBase
     [HasPermission("/role-permissions", PermissionAction.Create)]
     public async Task<ActionResult> InitializePermissions()
     {
-        var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
-        var isAdmin = userRole == "Admin";
+        // Use centralized permission service (follows Open/Closed Principle)
+        var userRole = CurrentUserRole;
+        var isSuperAdmin = IsSuperAdmin;
+        var isAdmin = PermissionService.HasRole(userRole, "Admin");
         var tenantId = isSuperAdmin ? "platform" : _tenantProvider.TenantId;
 
         // Check if permissions already exist for this tenant
@@ -460,7 +457,7 @@ public class RolePermissionsController : ControllerBase
     {
         // Check if user is SuperAdmin
         var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
+        var isSuperAdmin = IsSuperAdmin;
         var tenantId = isSuperAdmin ? null : _tenantProvider.TenantId;
 
         foreach (var permission in dto.Permissions)
@@ -501,7 +498,7 @@ public class RolePermissionsController : ControllerBase
     {
         // Check if user is SuperAdmin
         var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
+        var isSuperAdmin = IsSuperAdmin;
         var tenantId = isSuperAdmin ? null : _tenantProvider.TenantId;
 
         IQueryable<RolePermission> query = _context.RolePermissions
@@ -537,7 +534,7 @@ public class RolePermissionsController : ControllerBase
     {
         // Check if user is SuperAdmin
         var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
+        var isSuperAdmin = IsSuperAdmin;
         var tenantId = isSuperAdmin ? null : _tenantProvider.TenantId;
 
         IQueryable<RolePermission> query = _context.RolePermissions;
@@ -582,7 +579,7 @@ public class RolePermissionsController : ControllerBase
         };
 
         var userRole = User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value;
-        var isSuperAdmin = userRole == "SuperAdmin";
+        var isSuperAdmin = IsSuperAdmin;
         var tenantId = isSuperAdmin ? "platform" : _tenantProvider.TenantId;
 
         var roles = new[] { "SuperAdmin", "Admin", "HR", "Employee" };

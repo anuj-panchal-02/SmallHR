@@ -2,13 +2,18 @@ import { useState, useEffect } from 'react';
 import { Button, Space, Table, Tag, Popconfirm, Modal, Form, Input, Select, Switch } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, UserOutlined } from '@ant-design/icons';
 import { useNotification } from '../contexts/NotificationContext';
-import { departmentAPI, employeeAPI } from '../services/api';
+import { departmentAPI, employeeAPI, tenantAPI } from '../services/api';
+import { useAuthStore } from '../store/authStore';
 import type { Department, CreateDepartmentRequest, UpdateDepartmentRequest, Employee } from '../types/api';
 
 export default function Departments() {
   const notify = useNotification();
+  const { user } = useAuthStore();
+  const isSuperAdmin = user?.roles?.[0] === 'SuperAdmin';
   const [departments, setDepartments] = useState<Department[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [tenantFilter, setTenantFilter] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAssignHeadModalOpen, setIsAssignHeadModalOpen] = useState(false);
@@ -17,15 +22,30 @@ export default function Departments() {
   const [form] = Form.useForm();
   const [assignHeadForm] = Form.useForm();
 
+  // Fetch tenants for SuperAdmin
+  useEffect(() => {
+    if (isSuperAdmin) {
+      const fetchTenants = async () => {
+        try {
+          const response = await tenantAPI.getAll();
+          setTenants(response.data);
+        } catch (error) {
+          console.error('Failed to fetch tenants:', error);
+        }
+      };
+      fetchTenants();
+    }
+  }, [isSuperAdmin]);
+
   useEffect(() => {
     fetchDepartments();
     fetchEmployees();
-  }, []);
+  }, [tenantFilter]);
 
   const fetchDepartments = async () => {
     setLoading(true);
     try {
-      const response = await departmentAPI.getAll();
+      const response = await departmentAPI.getAll(tenantFilter);
       setDepartments(response.data);
     } catch (error: any) {
       notify.error('Failed to Load', error.response?.data?.message || 'Failed to load departments');
@@ -220,7 +240,25 @@ export default function Departments() {
 
   return (
     <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
+      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
+        <Space wrap>
+          {isSuperAdmin && (
+            <Select
+              placeholder="Tenant"
+              allowClear
+              style={{ width: 200 }}
+              size="large"
+              value={tenantFilter}
+              onChange={(value) => {
+                setTenantFilter(value);
+              }}
+              options={[
+                { value: undefined, label: 'All Tenants' },
+                ...tenants.map(t => ({ value: t.name || String(t.id), label: t.name || `Tenant ${t.id}` }))
+              ]}
+            />
+          )}
+        </Space>
         <Button
           type="primary"
           icon={<PlusOutlined />}

@@ -2,27 +2,47 @@ import { useState, useEffect } from 'react';
 import { Button, Space, Table, Tag, Popconfirm, Modal, Form, Input, Select, Switch } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useNotification } from '../contexts/NotificationContext';
-import { positionAPI, departmentAPI } from '../services/api';
+import { positionAPI, departmentAPI, tenantAPI } from '../services/api';
+import { useAuthStore } from '../store/authStore';
 import type { Position, CreatePositionRequest, UpdatePositionRequest, Department } from '../types/api';
 
 export default function Positions() {
   const notify = useNotification();
+  const { user } = useAuthStore();
+  const isSuperAdmin = user?.roles?.[0] === 'SuperAdmin';
   const [positions, setPositions] = useState<Position[]>([]);
   const [departments, setDepartments] = useState<Department[]>([]);
+  const [tenants, setTenants] = useState<any[]>([]);
+  const [tenantFilter, setTenantFilter] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingPosition, setEditingPosition] = useState<Position | null>(null);
   const [form] = Form.useForm();
 
+  // Fetch tenants for SuperAdmin
+  useEffect(() => {
+    if (isSuperAdmin) {
+      const fetchTenants = async () => {
+        try {
+          const response = await tenantAPI.getAll();
+          setTenants(response.data);
+        } catch (error) {
+          console.error('Failed to fetch tenants:', error);
+        }
+      };
+      fetchTenants();
+    }
+  }, [isSuperAdmin]);
+
   useEffect(() => {
     fetchPositions();
     fetchDepartments();
-  }, []);
+  }, [tenantFilter]);
 
   const fetchPositions = async () => {
     setLoading(true);
     try {
-      const response = await positionAPI.getAll();
+      const response = await positionAPI.getAll(tenantFilter);
       setPositions(response.data);
     } catch (error: any) {
       notify.error('Failed to Load', error.response?.data?.message || 'Failed to load positions');
@@ -167,7 +187,25 @@ export default function Positions() {
 
   return (
     <div>
-      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
+      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }} wrap>
+        <Space wrap>
+          {isSuperAdmin && (
+            <Select
+              placeholder="Tenant"
+              allowClear
+              style={{ width: 200 }}
+              size="large"
+              value={tenantFilter}
+              onChange={(value) => {
+                setTenantFilter(value);
+              }}
+              options={[
+                { value: undefined, label: 'All Tenants' },
+                ...tenants.map(t => ({ value: t.name || String(t.id), label: t.name || `Tenant ${t.id}` }))
+              ]}
+            />
+          )}
+        </Space>
         <Button
           type="primary"
           icon={<PlusOutlined />}

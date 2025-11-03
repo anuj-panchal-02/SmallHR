@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.DTOs.Position;
 using SmallHR.Core.Interfaces;
 
@@ -7,34 +9,31 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin,Admin,HR")]
-public class PositionsController : ControllerBase
+[AuthorizeHR]
+public class PositionsController : BaseApiController
 {
     private readonly IPositionService _positionService;
-    private readonly ILogger<PositionsController> _logger;
 
     public PositionsController(IPositionService positionService, ILogger<PositionsController> logger)
+        : base(logger)
     {
         _positionService = positionService;
-        _logger = logger;
     }
 
     /// <summary>
     /// Get all positions
     /// </summary>
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<PositionDto>>> GetPositions()
+    public async Task<ActionResult<IEnumerable<PositionDto>>> GetPositions([FromQuery] string? tenantId = null)
     {
-        try
-        {
-            var positions = await _positionService.GetAllPositionsAsync();
-            return Ok(positions);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting positions");
-            return StatusCode(500, new { message = "An error occurred while getting positions" });
-        }
+        var tenantIdForRequest = HttpContext.RequestServices
+            .GetRequiredService<ITenantFilterService>()
+            .ResolveTenantIdForRequest(IsSuperAdmin, tenantId);
+
+        return await HandleCollectionResultAsync(
+            () => _positionService.GetAllPositionsAsync(tenantIdForRequest),
+            "getting positions"
+        );
     }
 
     /// <summary>
@@ -43,21 +42,11 @@ public class PositionsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<PositionDto>> GetPosition(int id)
     {
-        try
-        {
-            var position = await _positionService.GetPositionByIdAsync(id);
-            if (position == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(position);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting position with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while getting position" });
-        }
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _positionService.GetPositionByIdAsync(id),
+            $"getting position with ID {id}",
+            "Position"
+        );
     }
 
     /// <summary>
@@ -66,16 +55,10 @@ public class PositionsController : ControllerBase
     [HttpGet("department/{departmentId}")]
     public async Task<ActionResult<IEnumerable<PositionDto>>> GetPositionsByDepartment(int departmentId)
     {
-        try
-        {
-            var positions = await _positionService.GetPositionsByDepartmentIdAsync(departmentId);
-            return Ok(positions);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting positions for department: {DepartmentId}", departmentId);
-            return StatusCode(500, new { message = "An error occurred while getting positions" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _positionService.GetPositionsByDepartmentIdAsync(departmentId),
+            $"getting positions for department {departmentId}"
+        );
     }
 
     /// <summary>
@@ -84,103 +67,67 @@ public class PositionsController : ControllerBase
     [HttpGet("titles")]
     public async Task<ActionResult<IEnumerable<string>>> GetPositionTitles()
     {
-        try
-        {
-            var titles = await _positionService.GetPositionTitlesAsync();
-            return Ok(titles);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting position titles");
-            return StatusCode(500, new { message = "An error occurred while getting position titles" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _positionService.GetPositionTitlesAsync(),
+            "getting position titles"
+        );
     }
 
     /// <summary>
     /// Create new position
     /// </summary>
     [HttpPost]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<PositionDto>> CreatePosition([FromBody] CreatePositionDto createPositionDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
+            return BadRequest(ModelState);
+        }
 
-            var position = await _positionService.CreatePositionAsync(createPositionDto);
-            return CreatedAtAction(nameof(GetPosition), new { id = position.Id }, position);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while creating position");
-            return StatusCode(500, new { message = "An error occurred while creating position" });
-        }
+        return await HandleCreateResultAsync(
+            () => _positionService.CreatePositionAsync(createPositionDto),
+            nameof(GetPosition),
+            pos => pos.Id,
+            "creating position"
+        );
     }
 
     /// <summary>
     /// Update position
     /// </summary>
     [HttpPut("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<PositionDto>> UpdatePosition(int id, [FromBody] UpdatePositionDto updatePositionDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (!await _positionService.PositionExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var position = await _positionService.UpdatePositionAsync(id, updatePositionDto);
-            if (position == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(position);
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while updating position with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while updating position" });
-        }
+
+        return await HandleUpdateResultAsync(
+            () => _positionService.PositionExistsAsync(id),
+            () => _positionService.UpdatePositionAsync(id, updatePositionDto),
+            id,
+            "updating position",
+            "Position"
+        );
     }
 
     /// <summary>
     /// Delete position
     /// </summary>
     [HttpDelete("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult> DeletePosition(int id)
     {
-        try
-        {
-            if (!await _positionService.PositionExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var result = await _positionService.DeletePositionAsync(id);
-            if (!result)
-            {
-                return BadRequest();
-            }
-
-            return NoContent();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while deleting position with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while deleting position" });
-        }
+        return await HandleDeleteResultAsync(
+            () => _positionService.PositionExistsAsync(id),
+            () => _positionService.DeletePositionAsync(id),
+            id,
+            "deleting position",
+            "Position"
+        );
     }
 }
 

@@ -29,9 +29,9 @@ public class DepartmentService : IDepartmentService
         _tenantProvider = tenantProvider;
     }
 
-    public async Task<IEnumerable<DepartmentDto>> GetAllDepartmentsAsync()
+    public async Task<IEnumerable<DepartmentDto>> GetAllDepartmentsAsync(string? tenantId = null)
     {
-        var departments = await _departmentRepository.GetAllAsync();
+        var departments = await _departmentRepository.GetAllAsync(tenantId);
         var departmentDtos = new List<DepartmentDto>();
 
         foreach (var dept in departments)
@@ -49,9 +49,17 @@ public class DepartmentService : IDepartmentService
                 }
             }
             
-            // Get employee count
-            dto.EmployeeCount = await _context.Employees
-                .CountAsync(e => e.Department == dept.Name && !e.IsDeleted);
+            // Get employee count (respect tenant filter if provided)
+            var employeeQuery = _context.Employees.Where(e => e.Department == dept.Name && !e.IsDeleted);
+            if (tenantId != null)
+            {
+                employeeQuery = employeeQuery.IgnoreQueryFilters();
+                if (!string.IsNullOrWhiteSpace(tenantId))
+                {
+                    employeeQuery = employeeQuery.Where(e => e.TenantId == tenantId);
+                }
+            }
+            dto.EmployeeCount = await employeeQuery.CountAsync();
             
             // Get positions for this department
             var positions = await _positionRepository.GetByDepartmentIdAsync(dept.Id);

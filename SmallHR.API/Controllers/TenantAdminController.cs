@@ -2,8 +2,10 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
+using SmallHR.Core.DTOs.Tenant;
 using SmallHR.Infrastructure.Data;
 using System.Security.Claims;
 using System.IdentityModel.Tokens.Jwt;
@@ -11,6 +13,7 @@ using System.Text;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.Extensions.DependencyInjection;
 using SmallHR.API.Services;
+using SmallHR.API.Authorization;
 
 namespace SmallHR.API.Controllers;
 
@@ -20,15 +23,15 @@ namespace SmallHR.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/admin/tenants")]
-[Authorize(Roles = "SuperAdmin")]
-public class TenantAdminController : ControllerBase
+[AuthorizeSuperAdmin]
+public class TenantAdminController : BaseApiController
 {
     private readonly ApplicationDbContext _context;
     private readonly UserManager<User> _userManager;
     private readonly IAdminAuditService _adminAuditService;
     private readonly IConfiguration _configuration;
-    private readonly ILogger<TenantAdminController> _logger;
     private readonly ITenantProvisioningService? _provisioningService;
+    private readonly ISortStrategyFactory<Tenant> _sortStrategyFactory;
 
     public TenantAdminController(
         ApplicationDbContext context,
@@ -36,22 +39,23 @@ public class TenantAdminController : ControllerBase
         IAdminAuditService adminAuditService,
         IConfiguration configuration,
         ILogger<TenantAdminController> logger,
-        IServiceProvider serviceProvider)
+        IServiceProvider serviceProvider,
+        ISortStrategyFactory<Tenant> sortStrategyFactory) : base(logger)
     {
         _context = context;
         _userManager = userManager;
         _adminAuditService = adminAuditService;
         _configuration = configuration;
-        _logger = logger;
         // Get provisioning service if available (optional dependency)
         _provisioningService = serviceProvider.GetService<ITenantProvisioningService>();
+        _sortStrategyFactory = sortStrategyFactory;
     }
 
     /// <summary>
     /// Get all tenants with comprehensive details (status, plan, usage, users)
     /// </summary>
     [HttpGet]
-    public async Task<IActionResult> GetAllTenants(
+    public async Task<ActionResult<TenantListResponseDto>> GetAllTenants(
         [FromQuery] string? search = null,
         [FromQuery] TenantStatus? status = null,
         [FromQuery] SubscriptionStatus? subscriptionStatus = null,
@@ -60,17 +64,47 @@ public class TenantAdminController : ControllerBase
         [FromQuery] string? sortBy = "createdAt",
         [FromQuery] string? sortOrder = "desc")
     {
-        try
-        {
-            var query = _context.Tenants.AsQueryable();
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                Logger.LogInformation("Fetching tenants - Starting query. User role: {Role}", 
+                    User.FindFirst(System.Security.Claims.ClaimTypes.Role)?.Value ?? "Unknown");
+                
+                // Use IgnoreQueryFilters to ensure SuperAdmin sees all tenants
+                // Note: Tenant entity doesn't have a query filter, but using IgnoreQueryFilters for safety
+                var query = _context.Tenants.IgnoreQueryFilters().AsQueryable();
+                
+                // Log query for debugging - try multiple query approaches to verify data exists
+                var totalTenantCountDirect = await _context.Tenants.CountAsync();
+                var totalTenantCountIgnored = await _context.Tenants.IgnoreQueryFilters().CountAsync();
+                
+                Logger.LogInformation("Fetching tenants - Direct count: {DirectCount}, IgnoreQueryFilters count: {IgnoredCount}", 
+                    totalTenantCountDirect, totalTenantCountIgnored);
+                
+                // Try to get raw tenant list to verify data exists
+                var rawTenantsDirect = await _context.Tenants.Take(5).ToListAsync();
+                var rawTenantsIgnored = await _context.Tenants.IgnoreQueryFilters().Take(5).ToListAsync();
+                
+                Logger.LogInformation("Fetching tenants - Direct sample tenant IDs: {Ids}", 
+                    string.Join(", ", rawTenantsDirect.Select(t => t.Id)));
+                Logger.LogInformation("Fetching tenants - IgnoreQueryFilters sample tenant IDs: {Ids}", 
+                    string.Join(", ", rawTenantsIgnored.Select(t => t.Id)));
+                
+                if (totalTenantCountIgnored == 0)
+                {
+                    Logger.LogWarning("No tenants found in database. SuperAdmin may need to create tenants.");
+                }
+                
+                // Use the count that found data
+                var totalTenantCount = totalTenantCountIgnored > 0 ? totalTenantCountIgnored : totalTenantCountDirect;
 
             // Search filter
             if (!string.IsNullOrWhiteSpace(search))
             {
                 query = query.Where(t => 
                     t.Name.Contains(search) || 
-                    t.Domain.Contains(search) ||
-                    t.AdminEmail.Contains(search));
+                    (t.Domain != null && t.Domain.Contains(search)) ||
+                    (t.AdminEmail != null && t.AdminEmail.Contains(search)));
             }
 
             // Status filter
@@ -83,475 +117,597 @@ public class TenantAdminController : ControllerBase
             if (subscriptionStatus.HasValue)
             {
                 var tenantIds = await _context.Subscriptions
+                    .IgnoreQueryFilters()
                     .Where(s => s.Status == subscriptionStatus.Value)
                     .Select(s => s.TenantId)
                     .ToListAsync();
                 query = query.Where(t => tenantIds.Contains(t.Id));
             }
 
-            // Sorting
-            query = sortBy?.ToLower() switch
+            // Sorting - use strategy pattern (follows Open/Closed Principle)
+            var sortDirection = sortOrder?.ToLower() == "asc" ? "asc" : "desc";
+            var strategy = _sortStrategyFactory.GetStrategy(sortBy ?? "createdat");
+            if (strategy == null)
             {
-                "name" => sortOrder == "asc" ? query.OrderBy(t => t.Name) : query.OrderByDescending(t => t.Name),
-                "createdat" => sortOrder == "asc" ? query.OrderBy(t => t.CreatedAt) : query.OrderByDescending(t => t.CreatedAt),
-                "status" => sortOrder == "asc" ? query.OrderBy(t => t.Status) : query.OrderByDescending(t => t.Status),
-                _ => query.OrderByDescending(t => t.CreatedAt)
-            };
+                strategy = _sortStrategyFactory.GetDefaultStrategy();
+            }
+            query = strategy.ApplySort(query, sortDirection);
 
             var totalCount = await query.CountAsync();
+            Logger.LogInformation("Fetching tenants - After filters: {Count} tenants match criteria", totalCount);
+            
+            // If totalCount is 0 but we know data exists, log a warning
+            if (totalCount == 0 && totalTenantCount > 0)
+            {
+                Logger.LogWarning("Tenants exist ({TotalTenantCount}) but filters returned 0. Search: {Search}, Status: {Status}, SubscriptionStatus: {SubscriptionStatus}", 
+                    totalTenantCount, search ?? "none", status?.ToString() ?? "none", subscriptionStatus?.ToString() ?? "none");
+            }
+            
             var tenants = await query
                 .Skip((pageNumber - 1) * pageSize)
                 .Take(pageSize)
                 .ToListAsync();
-
-            // Get user counts and usage metrics for each tenant
-            var tenantDetails = new List<object>();
-            foreach (var tenant in tenants)
+            
+            Logger.LogInformation("Fetching tenants - Retrieved {Count} tenants for page {Page} (totalCount: {TotalCount})", 
+                tenants.Count, pageNumber, totalCount);
+            
+            if (tenants.Count == 0 && totalCount > 0)
             {
-                var userCount = await _context.Users.CountAsync(u => u.TenantId == tenant.Id.ToString());
-                var employeeCount = await _context.Employees.CountAsync(e => e.TenantId == tenant.Id.ToString());
-                var usageMetrics = await _context.TenantUsageMetrics
-                    .FirstOrDefaultAsync(m => m.TenantId == tenant.Id);
-
-                var activeSubscription = await _context.Subscriptions
-                    .Include(s => s.Plan)
-                    .FirstOrDefaultAsync(s => s.TenantId == tenant.Id && s.Status == SubscriptionStatus.Active);
-                var subscription = activeSubscription != null
-                    ? new
-                    {
-                    planName = activeSubscription.Plan?.Name ?? "Unknown",
-                    status = activeSubscription.Status.ToString(),
-                    currentPeriodEnd = activeSubscription.EndDate,
-                    price = activeSubscription.Price,
-                    billingPeriod = activeSubscription.BillingPeriod.ToString()
-                    }
-                    : null;
-
-                tenantDetails.Add(new
-                {
-                    id = tenant.Id,
-                    name = tenant.Name,
-                    domain = tenant.Domain,
-                    status = tenant.Status.ToString(),
-                    isActive = tenant.IsActive,
-                    isSubscriptionActive = tenant.IsSubscriptionActive,
-                    adminEmail = tenant.AdminEmail,
-                    adminFirstName = tenant.AdminFirstName,
-                    adminLastName = tenant.AdminLastName,
-                    createdAt = tenant.CreatedAt,
-                    updatedAt = tenant.UpdatedAt,
-                    subscription = subscription,
-                    userCount = userCount,
-                    employeeCount = employeeCount,
-                    usageMetrics = usageMetrics != null ? new
-                    {
-                        apiRequestCount = usageMetrics.ApiRequestCount,
-                        lastUpdated = usageMetrics.UpdatedAt
-                    } : null
-                });
+                Logger.LogWarning("Tenants exist in DB ({TotalCount}) but query returned 0 for page {Page}, pageSize {PageSize}", 
+                    totalCount, pageNumber, pageSize);
+            }
+            
+            if (tenants.Count == 0 && totalTenantCount > 0 && totalCount == 0)
+            {
+                Logger.LogError("CRITICAL: Tenants exist ({TotalTenantCount}) but query with filters returned 0. This indicates a filtering issue.", 
+                    totalTenantCount);
             }
 
-            return Ok(new
+            // Get user counts and usage metrics for each tenant
+            // Use IgnoreQueryFilters for related entities to ensure SuperAdmin sees all data
+            // OPTIMIZED: Batch load all related data to avoid N+1 queries and timeouts
+            var tenantDetails = new List<TenantListDto>();
+            Logger.LogInformation("Fetching tenants - Processing {Count} tenants for details", tenants.Count);
+            
+            if (tenants.Count > 0)
             {
-                totalCount = totalCount,
-                pageNumber = pageNumber,
-                pageSize = pageSize,
-                totalPages = (int)Math.Ceiling(totalCount / (double)pageSize),
-                tenants = tenantDetails
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error fetching tenants");
-            return StatusCode(500, new { message = "Error fetching tenants", error = ex.Message });
-        }
+                var tenantIds = tenants.Select(t => t.Id).ToList();
+                var tenantIdStrings = tenantIds.Select(id => id.ToString()).ToList();
+                
+                // Batch load user counts per tenant (single query)
+                // TenantId is stored as string, so compare as strings
+                var userCountsByTenant = await _context.Users
+                    .IgnoreQueryFilters()
+                    .Where(u => u.TenantId != null && tenantIdStrings.Contains(u.TenantId))
+                    .GroupBy(u => u.TenantId)
+                    .Select(g => new { TenantIdStr = g.Key!, Count = g.Count() })
+                    .ToListAsync();
+                
+                var userCountsDict = userCountsByTenant
+                    .Where(x => int.TryParse(x.TenantIdStr, out _))
+                    .ToDictionary(x => int.Parse(x.TenantIdStr), x => x.Count);
+                
+                // Batch load employee counts per tenant (single query)
+                var employeeCountsByTenant = await _context.Employees
+                    .IgnoreQueryFilters()
+                    .Where(e => tenantIdStrings.Contains(e.TenantId))
+                    .GroupBy(e => e.TenantId)
+                    .Select(g => new { TenantIdStr = g.Key, Count = g.Count() })
+                    .ToListAsync();
+                
+                var employeeCountsDict = employeeCountsByTenant
+                    .Where(x => int.TryParse(x.TenantIdStr, out _))
+                    .ToDictionary(x => int.Parse(x.TenantIdStr), x => x.Count);
+                
+                // Batch load usage metrics for all tenants (single query)
+                var usageMetricsByTenant = await _context.TenantUsageMetrics
+                    .IgnoreQueryFilters()
+                    .Where(m => tenantIds.Contains(m.TenantId))
+                    .ToDictionaryAsync(m => m.TenantId);
+                
+                // Batch load active subscriptions for all tenants (single query with Include)
+                var activeSubscriptionsByTenant = await _context.Subscriptions
+                    .IgnoreQueryFilters()
+                    .Include(s => s.Plan)
+                    .Where(s => tenantIds.Contains(s.TenantId) && s.Status == SubscriptionStatus.Active)
+                    .ToDictionaryAsync(s => s.TenantId);
+                
+                Logger.LogInformation("Fetching tenants - Batch loaded data: Users for {UserTenantCount} tenants, Employees for {EmployeeTenantCount} tenants, UsageMetrics for {MetricsTenantCount} tenants, Subscriptions for {SubscriptionTenantCount} tenants",
+                    userCountsDict.Count, employeeCountsDict.Count, usageMetricsByTenant.Count, activeSubscriptionsByTenant.Count);
+                
+                // Build tenant details using pre-loaded data (no additional queries)
+                foreach (var tenant in tenants)
+                {
+                    // Get counts with default value of 0 if not found
+                    var userCount = userCountsDict.TryGetValue(tenant.Id, out var uc) ? uc : 0;
+                    var employeeCount = employeeCountsDict.TryGetValue(tenant.Id, out var ec) ? ec : 0;
+                    usageMetricsByTenant.TryGetValue(tenant.Id, out var usageMetrics);
+                    activeSubscriptionsByTenant.TryGetValue(tenant.Id, out var activeSubscription);
+                    
+                    var subscription = activeSubscription != null
+                        ? new TenantSubscriptionDto
+                        {
+                            PlanName = activeSubscription.Plan?.Name ?? "Unknown",
+                            Status = activeSubscription.Status.ToString(),
+                            CurrentPeriodEnd = activeSubscription.EndDate,
+                            Price = activeSubscription.Price,
+                            BillingPeriod = activeSubscription.BillingPeriod.ToString()
+                        }
+                        : null;
+
+                    tenantDetails.Add(new TenantListDto
+                    {
+                        Id = tenant.Id,
+                        Name = tenant.Name,
+                        Domain = tenant.Domain,
+                        Status = tenant.Status.ToString(),
+                        IsActive = tenant.IsActive,
+                        IsSubscriptionActive = tenant.IsSubscriptionActive,
+                        AdminEmail = tenant.AdminEmail,
+                        AdminFirstName = tenant.AdminFirstName,
+                        AdminLastName = tenant.AdminLastName,
+                        CreatedAt = tenant.CreatedAt,
+                        UpdatedAt = tenant.UpdatedAt ?? tenant.CreatedAt,
+                        Subscription = subscription,
+                        UserCount = userCount,
+                        EmployeeCount = employeeCount,
+                        UsageMetrics = usageMetrics != null ? new TenantUsageMetricsDto
+                        {
+                            ApiRequestCount = usageMetrics.ApiRequestCount,
+                            LastUpdated = usageMetrics.UpdatedAt ?? DateTime.UtcNow
+                        } : null
+                    });
+                }
+            }
+
+                var response = new TenantListResponseDto
+                {
+                    TotalCount = totalCount,
+                    PageNumber = pageNumber,
+                    PageSize = pageSize,
+                    TotalPages = (int)Math.Ceiling(totalCount / (double)pageSize),
+                    Tenants = tenantDetails
+                };
+                
+                Logger.LogInformation("Fetching tenants - Returning response with {TenantCount} tenants, totalCount: {TotalCount}", 
+                    tenantDetails.Count, totalCount);
+                
+                // Log first tenant details for debugging
+                if (tenantDetails.Count > 0)
+                {
+                    var firstTenant = tenantDetails[0];
+                    Logger.LogInformation("Fetching tenants - First tenant ID: {TenantId}, Name: {TenantName}", 
+                        firstTenant.Id, firstTenant.Name);
+                    
+                    // Serialize to JSON to verify structure
+                    var json = System.Text.Json.JsonSerializer.Serialize(response, new System.Text.Json.JsonSerializerOptions 
+                    { 
+                        WriteIndented = true 
+                    });
+                    Logger.LogInformation("Fetching tenants - Full serialized response: {Json}", json);
+                    Logger.LogInformation("Fetching tenants - Response type: {Type}", response.GetType().FullName);
+                    Logger.LogInformation("Fetching tenants - Response has 'Tenants' property: {HasTenants}, Count: {Count}", 
+                        response.Tenants != null, response.Tenants?.Count ?? 0);
+                }
+                else
+                {
+                    Logger.LogWarning("Fetching tenants - Response has 0 tenants but totalCount is {TotalCount}", totalCount);
+                }
+                
+                // Return the response directly - HandleServiceResultAsync will wrap it in Ok()
+                return response;
+            },
+            "fetching tenants"
+        );
     }
 
     /// <summary>
     /// Get tenant details by ID
     /// </summary>
     [HttpGet("{id}")]
-    public async Task<IActionResult> GetTenantById(int id)
+    public async Task<ActionResult<TenantDetailResponseDto>> GetTenantById(int id)
     {
-        try
-        {
-            var tenant = await _context.Tenants
-                .FirstOrDefaultAsync(t => t.Id == id);
-
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
+                // Use IgnoreQueryFilters to ensure SuperAdmin can access tenant data
+                var tenant = await _context.Tenants
+                    .IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(t => t.Id == id);
 
-            var userCount = await _context.Users.CountAsync(u => u.TenantId == tenant.Id.ToString());
-            var employeeCount = await _context.Employees.CountAsync(e => e.TenantId == tenant.Id.ToString());
-            var usageMetrics = await _context.TenantUsageMetrics
-                .FirstOrDefaultAsync(m => m.TenantId == tenant.Id);
-            
-            var subscriptionHistory = await _context.Subscriptions
-                .Where(s => s.TenantId == tenant.Id)
-                .OrderByDescending(s => s.CreatedAt)
-                .ToListAsync();
-
-            var lifecycleEvents = await _context.TenantLifecycleEvents
-                .Where(e => e.TenantId == tenant.Id)
-                .OrderByDescending(e => e.EventDate)
-                .Take(10)
-                .ToListAsync();
-
-            return Ok(new
-            {
-                id = tenant.Id,
-                name = tenant.Name,
-                domain = tenant.Domain,
-                status = tenant.Status.ToString(),
-                isActive = tenant.IsActive,
-                isSubscriptionActive = tenant.IsSubscriptionActive,
-                adminEmail = tenant.AdminEmail,
-                adminFirstName = tenant.AdminFirstName,
-                adminLastName = tenant.AdminLastName,
-                createdAt = tenant.CreatedAt,
-                updatedAt = tenant.UpdatedAt,
-                userCount = userCount,
-                employeeCount = employeeCount,
-                usageMetrics = usageMetrics,
-                subscriptions = subscriptionHistory.Select(s => new
+                if (tenant == null)
                 {
-                    id = s.Id,
-                    planName = s.Plan?.Name ?? "Unknown",
-                    status = s.Status.ToString(),
-                    price = s.Price,
-                    billingPeriod = s.BillingPeriod.ToString(),
-                    startDate = s.StartDate,
-                    endDate = s.EndDate,
-                    createdAt = s.CreatedAt
-                }),
-                recentLifecycleEvents = lifecycleEvents.Select(e => new
+                    throw new KeyNotFoundException("Tenant not found");
+                }
+
+                var tenantIdString = tenant.Id.ToString();
+                
+                // Use IgnoreQueryFilters for related data to ensure SuperAdmin sees all data
+                var userCount = await _context.Users
+                    .IgnoreQueryFilters()
+                    .CountAsync(u => u.TenantId == tenantIdString);
+                    
+                var employeeCount = await _context.Employees
+                    .IgnoreQueryFilters()
+                    .CountAsync(e => e.TenantId == tenantIdString);
+                    
+                var usageMetrics = await _context.TenantUsageMetrics
+                    .IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(m => m.TenantId == tenant.Id);
+                
+                var subscriptionHistory = await _context.Subscriptions
+                    .IgnoreQueryFilters()
+                    .Include(s => s.Plan)
+                    .Where(s => s.TenantId == tenant.Id)
+                    .OrderByDescending(s => s.CreatedAt)
+                    .ToListAsync();
+
+                var lifecycleEvents = await _context.TenantLifecycleEvents
+                    .IgnoreQueryFilters()
+                    .Where(e => e.TenantId == tenant.Id)
+                    .OrderByDescending(e => e.EventDate)
+                    .Take(10)
+                    .ToListAsync();
+
+                Logger.LogInformation("Fetching tenant {TenantId} ({TenantName}) - UserCount: {UserCount}, EmployeeCount: {EmployeeCount}, SubscriptionCount: {SubscriptionCount}, LifecycleEventCount: {LifecycleEventCount}",
+                    tenant.Id, tenant.Name, userCount, employeeCount, subscriptionHistory.Count, lifecycleEvents.Count);
+
+                var response = new TenantDetailResponseDto
                 {
-                    eventType = e.EventType.ToString(),
-                    eventDate = e.EventDate,
-                    description = e.Reason,
-                    metadata = e.Metadata
-                })
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error fetching tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error fetching tenant", error = ex.Message });
-        }
+                    Id = tenant.Id,
+                    Name = tenant.Name,
+                    Domain = tenant.Domain,
+                    Status = tenant.Status.ToString(),
+                    IsActive = tenant.IsActive,
+                    IsSubscriptionActive = tenant.IsSubscriptionActive,
+                    AdminEmail = tenant.AdminEmail,
+                    AdminFirstName = tenant.AdminFirstName,
+                    AdminLastName = tenant.AdminLastName,
+                    CreatedAt = tenant.CreatedAt,
+                    UpdatedAt = tenant.UpdatedAt ?? tenant.CreatedAt,
+                    UserCount = userCount,
+                    EmployeeCount = employeeCount,
+                    UsageMetrics = usageMetrics != null ? new TenantUsageMetricsDetailDto
+                    {
+                        ApiRequestCount = usageMetrics.ApiRequestCount,
+                        EmployeeCount = employeeCount,
+                        UserCount = userCount,
+                        LastUpdated = usageMetrics.UpdatedAt ?? DateTime.UtcNow
+                    } : null,
+                    Subscriptions = subscriptionHistory.Select(s => new TenantSubscriptionHistoryDto
+                    {
+                        Id = s.Id,
+                        PlanName = s.Plan?.Name ?? "Unknown",
+                        Status = s.Status.ToString(),
+                        Price = s.Price,
+                        BillingPeriod = s.BillingPeriod.ToString(),
+                        StartDate = s.StartDate,
+                        EndDate = s.EndDate,
+                        CreatedAt = s.CreatedAt
+                    }).ToList(),
+                    RecentLifecycleEvents = lifecycleEvents.Select(e => new TenantLifecycleEventDto
+                    {
+                        EventType = e.EventType.ToString(),
+                        EventDate = e.EventDate,
+                        Description = e.Reason,
+                        Metadata = e.Metadata ?? (object?)null
+                    }).ToList()
+                };
+                
+                Logger.LogInformation("Fetching tenant - Returning response with {SubscriptionCount} subscriptions, {LifecycleEventCount} lifecycle events",
+                    response.Subscriptions.Count, response.RecentLifecycleEvents.Count);
+                
+                return response;
+            },
+            $"fetching tenant with ID {id}"
+        );
     }
 
     /// <summary>
     /// Impersonate a tenant - Generate short-lived JWT token for SuperAdmin to view as tenant
     /// </summary>
     [HttpPost("{id}/impersonate")]
-    public async Task<IActionResult> ImpersonateTenant(int id, [FromQuery] int? durationMinutes = 30)
+    public async Task<ActionResult<ImpersonateResponseDto>> ImpersonateTenant(int id, [FromQuery] int? durationMinutes = 30)
     {
-        try
-        {
-            var tenant = await _context.Tenants.FindAsync(id);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
-
-            if (!tenant.IsActive || tenant.Status != TenantStatus.Active)
-            {
-                return BadRequest(new { message = "Cannot impersonate inactive or suspended tenant" });
-            }
-
-            var adminUser = await _userManager.GetUserAsync(User);
-            if (adminUser == null)
-            {
-                return Unauthorized();
-            }
-
-            // Generate impersonation token
-            var token = GenerateImpersonationToken(adminUser, tenant.Id.ToString(), durationMinutes ?? 30);
-
-            // Log impersonation action
-            await _adminAuditService.LogActionAsync(
-                adminUserId: adminUser.Id,
-                adminEmail: adminUser.Email ?? "unknown",
-                actionType: "Tenant.Impersonate",
-                httpMethod: "POST",
-                endpoint: $"/api/admin/tenants/{id}/impersonate",
-                statusCode: 200,
-                isSuccess: true,
-                targetTenantId: tenant.Id.ToString(),
-                targetEntityType: "Tenant",
-                targetEntityId: tenant.Id.ToString(),
-                metadata: $"{{\"durationMinutes\": {durationMinutes ?? 30}, \"tenantName\": \"{tenant.Name}\"}}",
-                ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
-
-            _logger.LogInformation("SuperAdmin {AdminEmail} impersonated tenant {TenantId} ({TenantName})", 
-                adminUser.Email, tenant.Id, tenant.Name);
-
-            return Ok(new
-            {
-                message = $"You are now impersonating tenant: {tenant.Name}",
-                impersonationToken = token,
-                tenant = new
+                var tenant = await _context.Tenants.FindAsync(id);
+                if (tenant == null)
                 {
-                    id = tenant.Id,
-                    name = tenant.Name,
-                    domain = tenant.Domain
-                },
-                expiresAt = DateTime.UtcNow.AddMinutes(durationMinutes ?? 30),
-                banner = $"You're viewing as Tenant: {tenant.Name} (Impersonation expires in {durationMinutes ?? 30} minutes)"
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error impersonating tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error impersonating tenant", error = ex.Message });
-        }
+                    throw new KeyNotFoundException("Tenant not found");
+                }
+
+                if (!tenant.IsActive || tenant.Status != TenantStatus.Active)
+                {
+                    throw new InvalidOperationException("Cannot impersonate inactive or suspended tenant");
+                }
+
+                var adminUser = await _userManager.GetUserAsync(User);
+                if (adminUser == null)
+                {
+                    throw new UnauthorizedAccessException("User not authenticated");
+                }
+
+                // Generate impersonation token
+                var token = GenerateImpersonationToken(adminUser, tenant.Id.ToString(), durationMinutes ?? 30);
+
+                // Log impersonation action
+                await _adminAuditService.LogActionAsync(
+                    adminUserId: adminUser.Id,
+                    adminEmail: adminUser.Email ?? "unknown",
+                    actionType: "Tenant.Impersonate",
+                    httpMethod: "POST",
+                    endpoint: $"/api/admin/tenants/{id}/impersonate",
+                    statusCode: 200,
+                    isSuccess: true,
+                    targetTenantId: tenant.Id.ToString(),
+                    targetEntityType: "Tenant",
+                    targetEntityId: tenant.Id.ToString(),
+                    metadata: $"{{\"durationMinutes\": {durationMinutes ?? 30}, \"tenantName\": \"{tenant.Name}\"}}",
+                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+
+                Logger.LogInformation("SuperAdmin {AdminEmail} impersonated tenant {TenantId} ({TenantName})", 
+                    adminUser.Email, tenant.Id, tenant.Name);
+
+                var response = new ImpersonateResponseDto
+                {
+                    Message = $"You are now impersonating tenant: {tenant.Name}",
+                    ImpersonationToken = token,
+                    Tenant = new ImpersonateTenantDto
+                    {
+                        Id = tenant.Id,
+                        Name = tenant.Name,
+                        Domain = tenant.Domain
+                    },
+                    ExpiresAt = DateTime.UtcNow.AddMinutes(durationMinutes ?? 30),
+                    Banner = $"You're viewing as Tenant: {tenant.Name} (Impersonation expires in {durationMinutes ?? 30} minutes)"
+                };
+                
+                Logger.LogInformation("Impersonate response - Token: {TokenLength} chars, TenantId: {TenantId}, ExpiresAt: {ExpiresAt}",
+                    token.Length, response.Tenant.Id, response.ExpiresAt);
+                
+                return response;
+            },
+            "impersonating tenant"
+        );
     }
 
     /// <summary>
     /// Stop impersonation - Clear impersonation context
     /// </summary>
     [HttpPost("stop-impersonation")]
-    public async Task<IActionResult> StopImpersonation()
+    public async Task<ActionResult<object>> StopImpersonation()
     {
-        try
-        {
-            var adminUser = await _userManager.GetUserAsync(User);
-            if (adminUser == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return Unauthorized();
-            }
+                var adminUser = await _userManager.GetUserAsync(User);
+                if (adminUser == null)
+                {
+                    throw new UnauthorizedAccessException("User not authenticated");
+                }
 
-            await _adminAuditService.LogActionAsync(
-                adminUserId: adminUser.Id,
-                adminEmail: adminUser.Email ?? "unknown",
-                actionType: "Tenant.StopImpersonation",
-                httpMethod: "POST",
-                endpoint: "/api/admin/tenants/stop-impersonation",
-                statusCode: 200,
-                isSuccess: true,
-                ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+                await _adminAuditService.LogActionAsync(
+                    adminUserId: adminUser.Id,
+                    adminEmail: adminUser.Email ?? "unknown",
+                    actionType: "Tenant.StopImpersonation",
+                    httpMethod: "POST",
+                    endpoint: "/api/admin/tenants/stop-impersonation",
+                    statusCode: 200,
+                    isSuccess: true,
+                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
 
-            return Ok(new { message = "Impersonation stopped successfully" });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error stopping impersonation");
-            return StatusCode(500, new { message = "Error stopping impersonation", error = ex.Message });
-        }
+                return new { message = "Impersonation stopped successfully" };
+            },
+            "stopping impersonation"
+        );
     }
 
     /// <summary>
     /// Suspend a tenant
     /// </summary>
     [HttpPost("{id}/suspend")]
-    public async Task<IActionResult> SuspendTenant(int id, [FromBody] SuspendTenantRequest? request = null)
+    public async Task<ActionResult<object>> SuspendTenant(int id, [FromBody] SuspendTenantRequest? request = null)
     {
-        try
-        {
-            var tenant = await _context.Tenants.FindAsync(id);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
+                var tenant = await _context.Tenants.FindAsync(id);
+                if (tenant == null)
+                {
+                    throw new KeyNotFoundException("Tenant not found");
+                }
 
-            tenant.Status = TenantStatus.Suspended;
-            tenant.IsActive = false;
-            tenant.IsSubscriptionActive = false;
-            await _context.SaveChangesAsync();
+                tenant.Status = TenantStatus.Suspended;
+                tenant.IsActive = false;
+                tenant.IsSubscriptionActive = false;
+                await _context.SaveChangesAsync();
 
-            var adminUser = await _userManager.GetUserAsync(User);
-            await _adminAuditService.LogActionAsync(
-                adminUserId: adminUser?.Id ?? "unknown",
-                adminEmail: adminUser?.Email ?? "unknown",
-                actionType: "Tenant.Suspend",
-                httpMethod: "POST",
-                endpoint: $"/api/admin/tenants/{id}/suspend",
-                statusCode: 200,
-                isSuccess: true,
-                targetTenantId: tenant.Id.ToString(),
-                targetEntityType: "Tenant",
-                targetEntityId: tenant.Id.ToString(),
-                requestPayload: request != null ? System.Text.Json.JsonSerializer.Serialize(request) : null,
-                ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+                var adminUser = await _userManager.GetUserAsync(User);
+                await _adminAuditService.LogActionAsync(
+                    adminUserId: adminUser?.Id ?? "unknown",
+                    adminEmail: adminUser?.Email ?? "unknown",
+                    actionType: "Tenant.Suspend",
+                    httpMethod: "POST",
+                    endpoint: $"/api/admin/tenants/{id}/suspend",
+                    statusCode: 200,
+                    isSuccess: true,
+                    targetTenantId: tenant.Id.ToString(),
+                    targetEntityType: "Tenant",
+                    targetEntityId: tenant.Id.ToString(),
+                    requestPayload: request != null ? System.Text.Json.JsonSerializer.Serialize(request) : null,
+                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
 
-            return Ok(new { message = $"Tenant {tenant.Name} has been suspended", tenant = new { id = tenant.Id, name = tenant.Name, status = tenant.Status.ToString() } });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error suspending tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error suspending tenant", error = ex.Message });
-        }
+                return new { message = $"Tenant {tenant.Name} has been suspended", tenant = new { id = tenant.Id, name = tenant.Name, status = tenant.Status.ToString() } };
+            },
+            "suspending tenant"
+        );
     }
 
     /// <summary>
     /// Resume/Reactivate a suspended tenant
     /// </summary>
     [HttpPost("{id}/resume")]
-    public async Task<IActionResult> ResumeTenant(int id)
+    public async Task<ActionResult<object>> ResumeTenant(int id)
     {
-        try
-        {
-            var tenant = await _context.Tenants.FindAsync(id);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
+                var tenant = await _context.Tenants.FindAsync(id);
+                if (tenant == null)
+                {
+                    throw new KeyNotFoundException("Tenant not found");
+                }
 
-            tenant.Status = TenantStatus.Active;
-            tenant.IsActive = true;
-            // Check if subscription is active
-            var activeSubscription = await _context.Subscriptions
-                .FirstOrDefaultAsync(s => s.TenantId == tenant.Id && s.Status == SubscriptionStatus.Active);
-            tenant.IsSubscriptionActive = activeSubscription != null;
-            
-            await _context.SaveChangesAsync();
+                tenant.Status = TenantStatus.Active;
+                tenant.IsActive = true;
+                // Check if subscription is active
+                var activeSubscription = await _context.Subscriptions
+                    .FirstOrDefaultAsync(s => s.TenantId == tenant.Id && s.Status == SubscriptionStatus.Active);
+                tenant.IsSubscriptionActive = activeSubscription != null;
+                
+                await _context.SaveChangesAsync();
 
-            var adminUser = await _userManager.GetUserAsync(User);
-            await _adminAuditService.LogActionAsync(
-                adminUserId: adminUser?.Id ?? "unknown",
-                adminEmail: adminUser?.Email ?? "unknown",
-                actionType: "Tenant.Resume",
-                httpMethod: "POST",
-                endpoint: $"/api/admin/tenants/{id}/resume",
-                statusCode: 200,
-                isSuccess: true,
-                targetTenantId: tenant.Id.ToString(),
-                targetEntityType: "Tenant",
-                targetEntityId: tenant.Id.ToString(),
-                ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+                var adminUser = await _userManager.GetUserAsync(User);
+                await _adminAuditService.LogActionAsync(
+                    adminUserId: adminUser?.Id ?? "unknown",
+                    adminEmail: adminUser?.Email ?? "unknown",
+                    actionType: "Tenant.Resume",
+                    httpMethod: "POST",
+                    endpoint: $"/api/admin/tenants/{id}/resume",
+                    statusCode: 200,
+                    isSuccess: true,
+                    targetTenantId: tenant.Id.ToString(),
+                    targetEntityType: "Tenant",
+                    targetEntityId: tenant.Id.ToString(),
+                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
 
-            return Ok(new { message = $"Tenant {tenant.Name} has been resumed", tenant = new { id = tenant.Id, name = tenant.Name, status = tenant.Status.ToString() } });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error resuming tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error resuming tenant", error = ex.Message });
-        }
+                return new { message = $"Tenant {tenant.Name} has been resumed", tenant = new { id = tenant.Id, name = tenant.Name, status = tenant.Status.ToString() } };
+            },
+            "resuming tenant"
+        );
     }
 
     /// <summary>
     /// Delete a tenant (soft delete - marks as deleted, data retained)
     /// </summary>
     [HttpDelete("{id}")]
-    public async Task<IActionResult> DeleteTenant(int id, [FromQuery] bool hardDelete = false)
+    public async Task<ActionResult<object>> DeleteTenant(int id, [FromQuery] bool hardDelete = false)
     {
-        try
-        {
-            var tenant = await _context.Tenants.FindAsync(id);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
-
-            var adminUser = await _userManager.GetUserAsync(User);
-            
-            // Convert tenant ID to string for matching with TenantId in RolePermissions and Modules
-            var tenantIdString = tenant.Id.ToString();
-
-            if (hardDelete)
-            {
-                // Hard delete - delete related data first, then remove tenant
-                
-                // Delete RolePermissions for this tenant
-                var rolePermissions = await _context.RolePermissions
-                    .Where(rp => rp.TenantId == tenantIdString)
-                    .ToListAsync();
-                if (rolePermissions.Any())
+                var tenant = await _context.Tenants.FindAsync(id);
+                if (tenant == null)
                 {
-                    _context.RolePermissions.RemoveRange(rolePermissions);
-                    _logger.LogInformation("Deleting {Count} RolePermissions for tenant {TenantId}", rolePermissions.Count, tenant.Id);
+                    throw new KeyNotFoundException("Tenant not found");
                 }
+
+                var adminUser = await _userManager.GetUserAsync(User);
                 
-                // Delete Modules for this tenant
-                var modules = await _context.Modules
-                    .Where(m => m.TenantId == tenantIdString)
-                    .ToListAsync();
-                if (modules.Any())
+                // Convert tenant ID to string for matching with TenantId in RolePermissions and Modules
+                var tenantIdString = tenant.Id.ToString();
+
+                if (hardDelete)
                 {
-                    _context.Modules.RemoveRange(modules);
-                    _logger.LogInformation("Deleting {Count} Modules for tenant {TenantId}", modules.Count, tenant.Id);
+                    // Hard delete - delete related data first, then remove tenant
+                    
+                    // Delete RolePermissions for this tenant
+                    var rolePermissions = await _context.RolePermissions
+                        .Where(rp => rp.TenantId == tenantIdString)
+                        .ToListAsync();
+                    if (rolePermissions.Any())
+                    {
+                        _context.RolePermissions.RemoveRange(rolePermissions);
+                        Logger.LogInformation("Deleting {Count} RolePermissions for tenant {TenantId}", rolePermissions.Count, tenant.Id);
+                    }
+                    
+                    // Delete Modules for this tenant
+                    var modules = await _context.Modules
+                        .Where(m => m.TenantId == tenantIdString)
+                        .ToListAsync();
+                    if (modules.Any())
+                    {
+                        _context.Modules.RemoveRange(modules);
+                        Logger.LogInformation("Deleting {Count} Modules for tenant {TenantId}", modules.Count, tenant.Id);
+                    }
+                    
+                    // Now delete the tenant itself
+                    _context.Tenants.Remove(tenant);
+                    await _context.SaveChangesAsync();
+
+                    await _adminAuditService.LogActionAsync(
+                        adminUserId: adminUser?.Id ?? "unknown",
+                        adminEmail: adminUser?.Email ?? "unknown",
+                        actionType: "Tenant.HardDelete",
+                        httpMethod: "DELETE",
+                        endpoint: $"/api/admin/tenants/{id}?hardDelete=true",
+                        statusCode: 200,
+                        isSuccess: true,
+                        targetTenantId: tenant.Id.ToString(),
+                        targetEntityType: "Tenant",
+                        targetEntityId: tenant.Id.ToString(),
+                        metadata: "{\"hardDelete\": true}",
+                        ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+
+                    return new { message = $"Tenant {tenant.Name} has been permanently deleted", hardDelete = true };
                 }
-                
-                // Now delete the tenant itself
-                _context.Tenants.Remove(tenant);
-                await _context.SaveChangesAsync();
-
-                await _adminAuditService.LogActionAsync(
-                    adminUserId: adminUser?.Id ?? "unknown",
-                    adminEmail: adminUser?.Email ?? "unknown",
-                    actionType: "Tenant.HardDelete",
-                    httpMethod: "DELETE",
-                    endpoint: $"/api/admin/tenants/{id}?hardDelete=true",
-                    statusCode: 200,
-                    isSuccess: true,
-                    targetTenantId: tenant.Id.ToString(),
-                    targetEntityType: "Tenant",
-                    targetEntityId: tenant.Id.ToString(),
-                    metadata: "{\"hardDelete\": true}",
-                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
-
-                return Ok(new { message = $"Tenant {tenant.Name} has been permanently deleted", hardDelete = true });
-            }
-            else
-            {
-                // Soft delete - mark as deleted, but also clean up RolePermissions and Modules
-                
-                // Delete RolePermissions for this tenant
-                var rolePermissions = await _context.RolePermissions
-                    .Where(rp => rp.TenantId == tenantIdString)
-                    .ToListAsync();
-                if (rolePermissions.Any())
+                else
                 {
-                    _context.RolePermissions.RemoveRange(rolePermissions);
-                    _logger.LogInformation("Deleting {Count} RolePermissions for tenant {TenantId}", rolePermissions.Count, tenant.Id);
-                }
-                
-                // Delete Modules for this tenant
-                var modules = await _context.Modules
-                    .Where(m => m.TenantId == tenantIdString)
-                    .ToListAsync();
-                if (modules.Any())
-                {
-                    _context.Modules.RemoveRange(modules);
-                    _logger.LogInformation("Deleting {Count} Modules for tenant {TenantId}", modules.Count, tenant.Id);
-                }
-                
-                // Mark tenant as deleted
-                tenant.Status = TenantStatus.Deleted;
-                tenant.IsActive = false;
-                tenant.IsSubscriptionActive = false;
-                await _context.SaveChangesAsync();
+                    // Soft delete - mark as deleted, but also clean up RolePermissions and Modules
+                    
+                    // Delete RolePermissions for this tenant
+                    var rolePermissions = await _context.RolePermissions
+                        .Where(rp => rp.TenantId == tenantIdString)
+                        .ToListAsync();
+                    if (rolePermissions.Any())
+                    {
+                        _context.RolePermissions.RemoveRange(rolePermissions);
+                        Logger.LogInformation("Deleting {Count} RolePermissions for tenant {TenantId}", rolePermissions.Count, tenant.Id);
+                    }
+                    
+                    // Delete Modules for this tenant
+                    var modules = await _context.Modules
+                        .Where(m => m.TenantId == tenantIdString)
+                        .ToListAsync();
+                    if (modules.Any())
+                    {
+                        _context.Modules.RemoveRange(modules);
+                        Logger.LogInformation("Deleting {Count} Modules for tenant {TenantId}", modules.Count, tenant.Id);
+                    }
+                    
+                    // Mark tenant as deleted
+                    tenant.Status = TenantStatus.Deleted;
+                    tenant.IsActive = false;
+                    tenant.IsSubscriptionActive = false;
+                    await _context.SaveChangesAsync();
 
-                await _adminAuditService.LogActionAsync(
-                    adminUserId: adminUser?.Id ?? "unknown",
-                    adminEmail: adminUser?.Email ?? "unknown",
-                    actionType: "Tenant.Delete",
-                    httpMethod: "DELETE",
-                    endpoint: $"/api/admin/tenants/{id}",
-                    statusCode: 200,
-                    isSuccess: true,
-                    targetTenantId: tenant.Id.ToString(),
-                    targetEntityType: "Tenant",
-                    targetEntityId: tenant.Id.ToString(),
-                    metadata: "{\"hardDelete\": false}",
-                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+                    await _adminAuditService.LogActionAsync(
+                        adminUserId: adminUser?.Id ?? "unknown",
+                        adminEmail: adminUser?.Email ?? "unknown",
+                        actionType: "Tenant.Delete",
+                        httpMethod: "DELETE",
+                        endpoint: $"/api/admin/tenants/{id}",
+                        statusCode: 200,
+                        isSuccess: true,
+                        targetTenantId: tenant.Id.ToString(),
+                        targetEntityType: "Tenant",
+                        targetEntityId: tenant.Id.ToString(),
+                        metadata: "{\"hardDelete\": false}",
+                        ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                        userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
 
-                return Ok(new { message = $"Tenant {tenant.Name} has been deleted (soft delete)", hardDelete = false });
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error deleting tenant", error = ex.Message });
-        }
+                    return new { message = $"Tenant {tenant.Name} has been deleted (soft delete)", hardDelete = false };
+                }
+            },
+            "deleting tenant"
+        );
     }
 
     /// <summary>
@@ -598,141 +754,129 @@ public class TenantAdminController : ControllerBase
     /// If tenant is in Provisioning status, will wait/retry for provisioning to complete
     /// </summary>
     [HttpGet("{id}/admin-setup-link")]
-    public async Task<IActionResult> GetAdminSetupLink(int id)
+    public async Task<ActionResult<object>> GetAdminSetupLink(int id)
     {
-        try
-        {
-            var tenant = await _context.Tenants.FindAsync(id);
-            if (tenant == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "Tenant not found" });
-            }
-
-            if (string.IsNullOrWhiteSpace(tenant.AdminEmail))
-            {
-                return BadRequest(new { message = "Tenant does not have an admin email" });
-            }
-
-            // If tenant is in Provisioning status, try to complete provisioning first
-            if (tenant.Status == TenantStatus.Provisioning && _provisioningService != null)
-            {
-                _logger.LogInformation("Tenant {TenantId} is in Provisioning status. Attempting to complete provisioning...", id);
-                
-                try
+                var tenant = await _context.Tenants.FindAsync(id);
+                if (tenant == null)
                 {
-                    var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
-                        tenant.Id,
-                        tenant.AdminEmail ?? string.Empty,
-                        tenant.AdminFirstName ?? "Admin",
-                        tenant.AdminLastName ?? tenant.Name ?? "User",
-                        subscriptionPlanId: null,
-                        startTrial: false);
+                    throw new KeyNotFoundException("Tenant not found");
+                }
 
-                    if (success)
+                if (string.IsNullOrWhiteSpace(tenant.AdminEmail))
+                {
+                    throw new ArgumentException("Tenant does not have an admin email");
+                }
+
+                // If tenant is in Provisioning status, try to complete provisioning first
+                if (tenant.Status == TenantStatus.Provisioning && _provisioningService != null)
+                {
+                    Logger.LogInformation("Tenant {TenantId} is in Provisioning status. Attempting to complete provisioning...", id);
+                    
+                    try
                     {
-                        _logger.LogInformation("Provisioning completed for tenant {TenantId}. Admin user should now exist.", id);
-                        // Refresh tenant to get updated status
-                        await _context.Entry(tenant).ReloadAsync();
+                        var (success, errorMessage, result) = await _provisioningService.ProvisionTenantAsync(
+                            tenant.Id,
+                            tenant.AdminEmail ?? string.Empty,
+                            tenant.AdminFirstName ?? "Admin",
+                            tenant.AdminLastName ?? tenant.Name ?? "User",
+                            subscriptionPlanId: null,
+                            startTrial: false);
+
+                        if (success)
+                        {
+                            Logger.LogInformation("Provisioning completed for tenant {TenantId}. Admin user should now exist.", id);
+                            // Refresh tenant to get updated status
+                            await _context.Entry(tenant).ReloadAsync();
+                        }
+                        else
+                        {
+                            Logger.LogWarning("Provisioning failed for tenant {TenantId}: {ErrorMessage}", id, errorMessage);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning(ex, "Error during provisioning for tenant {TenantId}. Will continue to check for admin user.", id);
+                    }
+                }
+
+                // Retry logic: Wait for admin user to be created (max 10 seconds)
+                User? adminUser = null;
+                int maxRetries = 10;
+                int retryDelayMs = 1000; // 1 second
+
+                for (int i = 0; i < maxRetries; i++)
+                {
+                    adminUser = await _userManager.FindByEmailAsync(tenant.AdminEmail);
+                    if (adminUser != null)
+                    {
+                        break;
+                    }
+
+                    if (i < maxRetries - 1)
+                    {
+                        Logger.LogInformation("Admin user not found for tenant {TenantId}, retrying in {DelayMs}ms (attempt {Attempt}/{MaxRetries})...", 
+                            id, retryDelayMs, i + 1, maxRetries);
+                        await Task.Delay(retryDelayMs);
+                    }
+                }
+
+                if (adminUser == null)
+                {
+                    // If still not found, check if we can trigger provisioning
+                    if (tenant.Status == TenantStatus.Provisioning)
+                    {
+                        throw new InvalidOperationException("Admin user not found. Provisioning is still in progress. Please wait a moment and try again.");
                     }
                     else
                     {
-                        _logger.LogWarning("Provisioning failed for tenant {TenantId}: {ErrorMessage}", id, errorMessage);
+                        throw new KeyNotFoundException("Admin user not found. The tenant may not be fully provisioned yet.");
                     }
                 }
-                catch (Exception ex)
+
+                // Generate password reset token (this is the token used for password setup)
+                var passwordToken = await _userManager.GeneratePasswordResetTokenAsync(adminUser);
+                
+                // Build the setup link
+                var baseUrl = _configuration["AppSettings:BaseUrl"] ?? "http://localhost:5173";
+                var setupLink = $"{baseUrl}/setup-password?token={Uri.EscapeDataString(passwordToken)}&userId={adminUser.Id}";
+
+                // Log action
+                var adminUserLogged = await _userManager.GetUserAsync(User);
+                await _adminAuditService.LogActionAsync(
+                    adminUserId: adminUserLogged?.Id ?? "unknown",
+                    adminEmail: adminUserLogged?.Email ?? "unknown",
+                    actionType: "Tenant.GetAdminSetupLink",
+                    httpMethod: "GET",
+                    endpoint: $"/api/admin/tenants/{id}/admin-setup-link",
+                    statusCode: 200,
+                    isSuccess: true,
+                    targetTenantId: tenant.Id.ToString(),
+                    targetEntityType: "Tenant",
+                    targetEntityId: tenant.Id.ToString(),
+                    metadata: $"{{\"adminEmail\": \"{tenant.AdminEmail}\", \"adminUserId\": \"{adminUser.Id}\"}}",
+                    ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
+                    userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
+
+                Logger.LogInformation("Generated admin setup link for tenant {TenantId} ({TenantName}) - Admin: {AdminEmail}", 
+                    tenant.Id, tenant.Name, tenant.AdminEmail);
+
+                return new
                 {
-                    _logger.LogWarning(ex, "Error during provisioning for tenant {TenantId}. Will continue to check for admin user.", id);
-                }
-            }
-
-            // Retry logic: Wait for admin user to be created (max 10 seconds)
-            User? adminUser = null;
-            int maxRetries = 10;
-            int retryDelayMs = 1000; // 1 second
-
-            for (int i = 0; i < maxRetries; i++)
-            {
-                adminUser = await _userManager.FindByEmailAsync(tenant.AdminEmail);
-                if (adminUser != null)
-                {
-                    break;
-                }
-
-                if (i < maxRetries - 1)
-                {
-                    _logger.LogInformation("Admin user not found for tenant {TenantId}, retrying in {DelayMs}ms (attempt {Attempt}/{MaxRetries})...", 
-                        id, retryDelayMs, i + 1, maxRetries);
-                    await Task.Delay(retryDelayMs);
-                }
-            }
-
-            if (adminUser == null)
-            {
-                // If still not found, check if we can trigger provisioning
-                if (tenant.Status == TenantStatus.Provisioning)
-                {
-                    return StatusCode(503, new 
-                    { 
-                        message = "Admin user not found. Provisioning is still in progress. Please wait a moment and try again.",
-                        tenantStatus = tenant.Status.ToString(),
-                        suggestion = "Wait a few seconds and try again, or trigger provisioning manually via POST /api/tenantprovisioning/{tenantId}"
-                    });
-                }
-                else
-                {
-                    return NotFound(new 
-                    { 
-                        message = "Admin user not found. The tenant may not be fully provisioned yet.",
-                        tenantStatus = tenant.Status.ToString(),
-                        suggestion = "Try triggering provisioning manually via POST /api/tenantprovisioning/{tenantId}"
-                    });
-                }
-            }
-
-            // Generate password reset token (this is the token used for password setup)
-            var passwordToken = await _userManager.GeneratePasswordResetTokenAsync(adminUser);
-            
-            // Build the setup link
-            var baseUrl = _configuration["AppSettings:BaseUrl"] ?? "http://localhost:5173";
-            var setupLink = $"{baseUrl}/setup-password?token={Uri.EscapeDataString(passwordToken)}&userId={adminUser.Id}";
-
-            // Log action
-            var adminUserLogged = await _userManager.GetUserAsync(User);
-            await _adminAuditService.LogActionAsync(
-                adminUserId: adminUserLogged?.Id ?? "unknown",
-                adminEmail: adminUserLogged?.Email ?? "unknown",
-                actionType: "Tenant.GetAdminSetupLink",
-                httpMethod: "GET",
-                endpoint: $"/api/admin/tenants/{id}/admin-setup-link",
-                statusCode: 200,
-                isSuccess: true,
-                targetTenantId: tenant.Id.ToString(),
-                targetEntityType: "Tenant",
-                targetEntityId: tenant.Id.ToString(),
-                metadata: $"{{\"adminEmail\": \"{tenant.AdminEmail}\", \"adminUserId\": \"{adminUser.Id}\"}}",
-                ipAddress: HttpContext.Connection.RemoteIpAddress?.ToString(),
-                userAgent: HttpContext.Request.Headers["User-Agent"].ToString());
-
-            _logger.LogInformation("Generated admin setup link for tenant {TenantId} ({TenantName}) - Admin: {AdminEmail}", 
-                tenant.Id, tenant.Name, tenant.AdminEmail);
-
-            return Ok(new
-            {
-                tenantId = tenant.Id,
-                tenantName = tenant.Name,
-                adminEmail = tenant.AdminEmail,
-                adminUserId = adminUser.Id,
-                setupLink = setupLink,
-                token = passwordToken, // Include token for development purposes
-                expiresIn = "7 days", // Password reset tokens typically expire in 7 days
-                message = "Use this link to set up the admin password. This link expires in 7 days."
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error generating admin setup link for tenant {TenantId}", id);
-            return StatusCode(500, new { message = "Error generating setup link", error = ex.Message });
-        }
+                    tenantId = tenant.Id,
+                    tenantName = tenant.Name,
+                    adminEmail = tenant.AdminEmail,
+                    adminUserId = adminUser.Id,
+                    setupLink = setupLink,
+                    token = passwordToken, // Include token for development purposes
+                    expiresIn = "7 days", // Password reset tokens typically expire in 7 days
+                    message = "Use this link to set up the admin password. This link expires in 7 days."
+                };
+            },
+            "generating admin setup link"
+        );
     }
 
     public record SuspendTenantRequest(string? Reason = null);

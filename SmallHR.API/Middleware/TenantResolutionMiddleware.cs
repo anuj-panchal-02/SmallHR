@@ -124,27 +124,40 @@ public class TenantResolutionMiddleware
         }
 
         // Enforce tenant boundary if authenticated
-        // JWT tenant claim must match resolved tenant ID to prevent cross-tenant access
-        if (isAuthenticated && source != "JWT_CLAIM")
+        // If a tenant is explicitly requested via headers/subdomain and it conflicts with JWT, forbid
+        if (isAuthenticated)
         {
             var jwtTenant = context.User.FindFirst("TenantId")?.Value 
                 ?? context.User.FindFirst("tenant")?.Value;
-            
-            // If JWT has a tenant claim, it must match the resolved tenant
-            // This prevents users from accessing data from a different tenant
-            if (!string.IsNullOrWhiteSpace(jwtTenant) && 
-                !string.Equals(jwtTenant, resolvedTenantId, StringComparison.OrdinalIgnoreCase))
-            {
-                context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                await context.Response.WriteAsync(
-                    $"Tenant mismatch. JWT tenant: '{jwtTenant}', Resolved tenant: '{resolvedTenantId}'. " +
-                    "Your authentication token is tied to a different tenant.");
-                return;
-            }
-            
-            // If JWT has tenant claim and we resolved from another source, use JWT (most authoritative)
+            // Explicit tenant requested via header
+            var requestedHeaderTenant = context.Request.Headers["X-Tenant-Id"].ToString();
+
+            // If JWT has a tenant claim, it must match either the already-resolved tenant or the explicit header
             if (!string.IsNullOrWhiteSpace(jwtTenant))
             {
+                // If there is an explicit header and it conflicts with JWT, forbid
+                if (!string.IsNullOrWhiteSpace(requestedHeaderTenant) &&
+                    !string.Equals(jwtTenant, requestedHeaderTenant, StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await context.Response.WriteAsync(
+                        $"Tenant mismatch. JWT tenant: '{jwtTenant}', Requested tenant: '{requestedHeaderTenant}'. " +
+                        "Your authentication token is tied to a different tenant.");
+                    return;
+                }
+
+                // If resolved tenant (from other source) conflicts with JWT, forbid
+                if (!string.IsNullOrWhiteSpace(resolvedTenantId) && source != "JWT_CLAIM" &&
+                    !string.Equals(jwtTenant, resolvedTenantId, StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                    await context.Response.WriteAsync(
+                        $"Tenant mismatch. JWT tenant: '{jwtTenant}', Resolved tenant: '{resolvedTenantId}'. " +
+                        "Your authentication token is tied to a different tenant.");
+                    return;
+                }
+
+                // Use JWT as most authoritative source
                 resolvedTenantId = jwtTenant;
                 source = "JWT_CLAIM";
             }

@@ -8,8 +8,13 @@ namespace SmallHR.Infrastructure.Repositories;
 
 public class EmployeeRepository : GenericRepository<Employee>, IEmployeeRepository
 {
-    public EmployeeRepository(ApplicationDbContext context) : base(context)
+    private readonly ISortStrategyFactory<Employee> _sortStrategyFactory;
+
+    public EmployeeRepository(
+        ApplicationDbContext context,
+        ISortStrategyFactory<Employee> sortStrategyFactory) : base(context)
     {
+        _sortStrategyFactory = sortStrategyFactory;
     }
 
     public async Task<Employee?> GetByEmployeeIdAsync(string employeeId)
@@ -132,48 +137,20 @@ public class EmployeeRepository : GenericRepository<Employee>, IEmployeeReposito
 
     private IQueryable<Employee> ApplySorting(IQueryable<Employee> query, string? sortBy, string? sortDirection)
     {
-        if (string.IsNullOrWhiteSpace(sortBy))
-        {
-            sortBy = "FirstName";
-        }
-
         sortDirection = string.IsNullOrWhiteSpace(sortDirection) || sortDirection.ToLower() == "asc"
             ? "asc"
             : "desc";
 
-        // Use strongly-typed expressions for better SQL translation
-        return sortBy.ToLower() switch
+        // Use strategy pattern - follows Open/Closed Principle
+        // New sort strategies can be added without modifying this method
+        var strategy = _sortStrategyFactory.GetStrategy(sortBy ?? "firstname");
+        
+        if (strategy == null)
         {
-            "firstname" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.FirstName) 
-                : query.OrderByDescending(e => e.FirstName),
-            "lastname" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.LastName) 
-                : query.OrderByDescending(e => e.LastName),
-            "email" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.Email) 
-                : query.OrderByDescending(e => e.Email),
-            "employeeid" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.EmployeeId) 
-                : query.OrderByDescending(e => e.EmployeeId),
-            "department" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.Department) 
-                : query.OrderByDescending(e => e.Department),
-            "position" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.Position) 
-                : query.OrderByDescending(e => e.Position),
-            "hiredate" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.HireDate) 
-                : query.OrderByDescending(e => e.HireDate),
-            "salary" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.Salary) 
-                : query.OrderByDescending(e => e.Salary),
-            "createdat" => sortDirection == "asc" 
-                ? query.OrderBy(e => e.CreatedAt) 
-                : query.OrderByDescending(e => e.CreatedAt),
-            _ => sortDirection == "asc" 
-                ? query.OrderBy(e => e.FirstName) 
-                : query.OrderByDescending(e => e.FirstName)
-        };
+            // Fallback to default strategy if no strategy found
+            strategy = _sortStrategyFactory.GetDefaultStrategy();
+        }
+
+        return strategy.ApplySort(query, sortDirection);
     }
 }

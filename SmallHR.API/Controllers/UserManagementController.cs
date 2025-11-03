@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.Entities;
 using System.ComponentModel.DataAnnotations;
 
@@ -9,267 +11,255 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin")]
-public class UserManagementController : ControllerBase
+[AuthorizeSuperAdmin]
+public class UserManagementController : BaseApiController
 {
     private readonly UserManager<User> _userManager;
     private readonly RoleManager<IdentityRole> _roleManager;
-    private readonly ILogger<UserManagementController> _logger;
 
     public UserManagementController(
         UserManager<User> userManager,
         RoleManager<IdentityRole> roleManager,
-        ILogger<UserManagementController> logger)
+        ILogger<UserManagementController> logger) : base(logger)
     {
         _userManager = userManager;
         _roleManager = roleManager;
-        _logger = logger;
     }
 
     /// <summary>
     /// Get all users
     /// </summary>
     [HttpGet("users")]
-    public async Task<ActionResult> GetAllUsers()
+    public async Task<ActionResult<IEnumerable<object>>> GetAllUsers()
     {
-        try
-        {
-            var users = await _userManager.Users.ToListAsync();
-            var userList = new List<object>();
-
-            foreach (var user in users)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                var roles = await _userManager.GetRolesAsync(user);
-                userList.Add(new
-                {
-                    user.Id,
-                    user.Email,
-                    user.FirstName,
-                    user.LastName,
-                    user.IsActive,
-                    user.CreatedAt,
-                    Roles = roles
-                });
-            }
+                var users = await _userManager.Users.ToListAsync();
+                var userList = new List<object>();
 
-            return Ok(userList);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting all users");
-            return StatusCode(500, new { message = "Error retrieving users" });
-        }
+                foreach (var user in users)
+                {
+                    var roles = await _userManager.GetRolesAsync(user);
+                    userList.Add(new
+                    {
+                        user.Id,
+                        user.Email,
+                        user.FirstName,
+                        user.LastName,
+                        user.IsActive,
+                        user.CreatedAt,
+                        Roles = roles
+                    });
+                }
+
+                return userList.AsEnumerable();
+            },
+            "getting all users"
+        );
     }
 
     /// <summary>
     /// Get all available roles
     /// </summary>
     [HttpGet("roles")]
-    public async Task<ActionResult> GetAllRoles()
+    public async Task<ActionResult<IEnumerable<string>>> GetAllRoles()
     {
-        try
-        {
-            var roles = await _roleManager.Roles.Select(r => r.Name).ToListAsync();
-            return Ok(roles);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting roles");
-            return StatusCode(500, new { message = "Error retrieving roles" });
-        }
+        return await HandleCollectionResultAsync<string>(
+            async () => await _roleManager.Roles.Select(r => r.Name!).ToListAsync(),
+            "getting all roles"
+        );
     }
 
     /// <summary>
     /// Create new user
     /// </summary>
     [HttpPost("create-user")]
-    public async Task<ActionResult> CreateUser([FromBody] CreateUserRequest request)
+    public async Task<ActionResult<object>> CreateUser([FromBody] CreateUserRequest request)
     {
-        try
+        // Validate model state
+        if (!ModelState.IsValid)
         {
-            // Validate model state
-            if (!ModelState.IsValid)
-            {
-                var errors = ModelState.Values
-                    .SelectMany(v => v.Errors)
-                    .Select(e => e.ErrorMessage)
-                    .ToList();
-                
-                _logger.LogWarning("Create user validation failed: {Errors}", string.Join(", ", errors));
-                return BadRequest(new { 
-                    message = "Validation failed", 
-                    errors = errors 
-                });
-            }
-
-            // Check if user already exists
-            var existingUser = await _userManager.FindByEmailAsync(request.Email);
-            if (existingUser != null)
-            {
-                _logger.LogWarning("Attempt to create user with existing email: {Email}", request.Email);
-                return BadRequest(new { message = "User with this email already exists" });
-            }
-
-            // Validate role exists
-            var roleExists = await _roleManager.RoleExistsAsync(request.Role);
-            if (!roleExists)
-            {
-                _logger.LogWarning("Attempt to create user with non-existent role: {Role}", request.Role);
-                return BadRequest(new { message = $"Role '{request.Role}' does not exist" });
-            }
-
-            // Create new user
-            // SuperAdmin users must have TenantId = null (platform layer)
-            var user = new User
-            {
-                UserName = request.Email,
-                Email = request.Email,
-                FirstName = request.FirstName,
-                LastName = request.LastName,
-                DateOfBirth = request.DateOfBirth,
-                IsActive = true,
-                TenantId = request.Role == "SuperAdmin" ? null : null // Will be set by tenant context if needed
-            };
-
-            var result = await _userManager.CreateAsync(user, request.Password);
-            if (!result.Succeeded)
-            {
-                var errorMessages = result.Errors.Select(e => e.Description).ToList();
-                _logger.LogWarning("User creation failed: {Errors}", string.Join(", ", errorMessages));
-                return BadRequest(new { 
-                    message = "User creation failed", 
-                    errors = errorMessages 
-                });
-            }
-
-            // Assign role
-            await _userManager.AddToRoleAsync(user, request.Role);
+            var errors = ModelState.Values
+                .SelectMany(v => v.Errors)
+                .Select(e => e.ErrorMessage)
+                .ToList();
             
-            // Ensure SuperAdmin has TenantId = null after role assignment
-            if (request.Role == "SuperAdmin" && user.TenantId != null)
+            Logger.LogWarning("Create user validation failed: {Errors}", string.Join(", ", errors));
+            return BadRequest(new { 
+                message = "Validation failed", 
+                errors = errors 
+            });
+        }
+
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                user.TenantId = null;
-                await _userManager.UpdateAsync(user);
-                _logger.LogInformation("Set TenantId = null for SuperAdmin user {Email}", user.Email);
-            }
+                // Check if user already exists
+                var existingUser = await _userManager.FindByEmailAsync(request.Email);
+                if (existingUser != null)
+                {
+                    Logger.LogWarning("Attempt to create user with existing email: {Email}", request.Email);
+                    throw new InvalidOperationException("User with this email already exists");
+                }
 
-            _logger.LogInformation("User created successfully: {Email} with role {Role}", request.Email, request.Role);
+                // Validate role exists
+                var roleExists = await _roleManager.RoleExistsAsync(request.Role);
+                if (!roleExists)
+                {
+                    Logger.LogWarning("Attempt to create user with non-existent role: {Role}", request.Role);
+                    throw new InvalidOperationException($"Role '{request.Role}' does not exist");
+                }
 
-            return Ok(new { 
-                message = "User created successfully", 
-                userId = user.Id,
-                email = user.Email,
-                role = request.Role
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error creating user: {Email}", request.Email);
-            return StatusCode(500, new { 
-                message = "Internal server error while creating user",
-                error = ex.Message
-            });
-        }
+                // Create new user
+                // SuperAdmin users must have TenantId = null (platform layer)
+                var user = new User
+                {
+                    UserName = request.Email,
+                    Email = request.Email,
+                    FirstName = request.FirstName,
+                    LastName = request.LastName,
+                    DateOfBirth = request.DateOfBirth,
+                    IsActive = true,
+                    TenantId = request.Role == "SuperAdmin" ? null : null // Will be set by tenant context if needed
+                };
+
+                var result = await _userManager.CreateAsync(user, request.Password);
+                if (!result.Succeeded)
+                {
+                    var errorMessages = result.Errors.Select(e => e.Description).ToList();
+                    Logger.LogWarning("User creation failed: {Errors}", string.Join(", ", errorMessages));
+                    throw new InvalidOperationException($"User creation failed: {string.Join(", ", errorMessages)}");
+                }
+
+                // Assign role
+                await _userManager.AddToRoleAsync(user, request.Role);
+                
+                // Ensure SuperAdmin has TenantId = null after role assignment
+                if (request.Role == "SuperAdmin" && user.TenantId != null)
+                {
+                    user.TenantId = null;
+                    await _userManager.UpdateAsync(user);
+                    Logger.LogInformation("Set TenantId = null for SuperAdmin user {Email}", user.Email);
+                }
+
+                Logger.LogInformation("User created successfully: {Email} with role {Role}", request.Email, request.Role);
+
+                return new { 
+                    message = "User created successfully", 
+                    userId = user.Id,
+                    email = user.Email,
+                    role = request.Role
+                };
+            },
+            "creating user"
+        );
     }
 
     /// <summary>
     /// Update user roles
     /// </summary>
     [HttpPut("update-role/{userId}")]
-    public async Task<ActionResult> UpdateUserRole(string userId, [FromBody] UpdateRoleRequest request)
+    public async Task<ActionResult<object>> UpdateUserRole(string userId, [FromBody] UpdateRoleRequest request)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
-            {
-                return NotFound(new { message = "User not found" });
-            }
+            return BadRequest(ModelState);
+        }
 
-            // Remove all existing roles
-            var currentRoles = await _userManager.GetRolesAsync(user);
-            await _userManager.RemoveFromRolesAsync(user, currentRoles);
-
-            // Add new role
-            if (!string.IsNullOrEmpty(request.Role))
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                var roleExists = await _roleManager.RoleExistsAsync(request.Role);
-                if (roleExists)
+                var user = await _userManager.FindByIdAsync(userId);
+                if (user == null)
                 {
+                    throw new KeyNotFoundException("User not found");
+                }
+
+                // Remove all existing roles
+                var currentRoles = await _userManager.GetRolesAsync(user);
+                await _userManager.RemoveFromRolesAsync(user, currentRoles);
+
+                // Add new role
+                if (!string.IsNullOrEmpty(request.Role))
+                {
+                    var roleExists = await _roleManager.RoleExistsAsync(request.Role);
+                    if (!roleExists)
+                    {
+                        throw new InvalidOperationException($"Role '{request.Role}' does not exist");
+                    }
                     await _userManager.AddToRoleAsync(user, request.Role);
                 }
-            }
 
-            _logger.LogInformation("User {UserId} role updated to {Role}", userId, request.Role);
+                Logger.LogInformation("User {UserId} role updated to {Role}", userId, request.Role);
 
-            return Ok(new { message = "Role updated successfully" });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error updating user role");
-            return StatusCode(500, new { message = "Error updating role" });
-        }
+                return new { message = "Role updated successfully" };
+            },
+            "updating user role"
+        );
     }
 
     /// <summary>
     /// Toggle user active status
     /// </summary>
     [HttpPut("toggle-status/{userId}")]
-    public async Task<ActionResult> ToggleUserStatus(string userId)
+    public async Task<ActionResult<object>> ToggleUserStatus(string userId)
     {
-        try
-        {
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "User not found" });
-            }
+                var user = await _userManager.FindByIdAsync(userId);
+                if (user == null)
+                {
+                    throw new KeyNotFoundException("User not found");
+                }
 
-            user.IsActive = !user.IsActive;
-            await _userManager.UpdateAsync(user);
+                user.IsActive = !user.IsActive;
+                await _userManager.UpdateAsync(user);
 
-            _logger.LogInformation("User {UserId} status toggled to {Status}", userId, user.IsActive);
+                Logger.LogInformation("User {UserId} status toggled to {Status}", userId, user.IsActive);
 
-            return Ok(new { message = "User status updated", isActive = user.IsActive });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error toggling user status");
-            return StatusCode(500, new { message = "Error updating status" });
-        }
+                return new { message = "User status updated", isActive = user.IsActive };
+            },
+            "toggling user status"
+        );
     }
 
     /// <summary>
     /// Reset user password
     /// </summary>
     [HttpPost("reset-password/{userId}")]
-    public async Task<ActionResult> ResetPassword(string userId, [FromBody] ResetPasswordRequest request)
+    public async Task<ActionResult<object>> ResetPassword(string userId, [FromBody] ResetPasswordRequest request)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
-            {
-                return NotFound(new { message = "User not found" });
-            }
-
-            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-            var result = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
-
-            if (!result.Succeeded)
-            {
-                return BadRequest(new { message = string.Join(", ", result.Errors.Select(e => e.Description)) });
-            }
-
-            _logger.LogInformation("Password reset for user {UserId}", userId);
-
-            return Ok(new { message = "Password reset successfully" });
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error resetting password");
-            return StatusCode(500, new { message = "Error resetting password" });
-        }
+
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var user = await _userManager.FindByIdAsync(userId);
+                if (user == null)
+                {
+                    throw new KeyNotFoundException("User not found");
+                }
+
+                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+                var result = await _userManager.ResetPasswordAsync(user, token, request.NewPassword);
+
+                if (!result.Succeeded)
+                {
+                    var errors = string.Join(", ", result.Errors.Select(e => e.Description));
+                    throw new InvalidOperationException($"Password reset failed: {errors}");
+                }
+
+                Logger.LogInformation("Password reset for user {UserId}", userId);
+
+                return new { message = "Password reset successfully" };
+            },
+            "resetting user password"
+        );
     }
 }
 

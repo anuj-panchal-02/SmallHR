@@ -90,4 +90,33 @@ public class AttendanceRepository : GenericRepository<Attendance>, IAttendanceRe
                                         && a.Date.Date == date.Date 
                                         && a.ClockOutTime.HasValue);
     }
+
+    public new async Task<IEnumerable<Attendance>> GetAllAsync(string? tenantId = null)
+    {
+        var query = _dbSet.AsQueryable();
+
+        // SuperAdmin filtering logic:
+        // - If tenantId is provided (non-empty), ignore query filters and filter by that specific tenant
+        // - If tenantId is empty string (""), it means SuperAdmin wants to see ALL tenants - ignore query filters
+        // - If tenantId is null, use normal query filters (regular user or tenantId not provided)
+        
+        if (tenantId != null)
+        {
+            // tenantId parameter was provided (SuperAdmin context)
+            query = query.IgnoreQueryFilters();
+            
+            if (!string.IsNullOrWhiteSpace(tenantId))
+            {
+                // Filter to specific tenant
+                query = query.Where(a => a.TenantId == tenantId);
+            }
+            // else tenantId is empty string - show all tenants (no additional filter)
+        }
+        // else: tenantId is null - use normal query filters (regular user)
+
+        // Filter out deleted attendance records
+        query = query.Where(a => !a.IsDeleted);
+
+        return await query.Include(a => a.Employee).ToListAsync();
+    }
 }

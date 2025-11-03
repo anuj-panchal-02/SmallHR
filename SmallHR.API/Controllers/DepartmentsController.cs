@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.DTOs.Department;
 using SmallHR.Core.Interfaces;
 
@@ -7,34 +9,31 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin,Admin,HR")]
-public class DepartmentsController : ControllerBase
+[AuthorizeHR]
+public class DepartmentsController : BaseApiController
 {
     private readonly IDepartmentService _departmentService;
-    private readonly ILogger<DepartmentsController> _logger;
 
     public DepartmentsController(IDepartmentService departmentService, ILogger<DepartmentsController> logger)
+        : base(logger)
     {
         _departmentService = departmentService;
-        _logger = logger;
     }
 
     /// <summary>
     /// Get all departments
     /// </summary>
     [HttpGet]
-    public async Task<ActionResult<IEnumerable<DepartmentDto>>> GetDepartments()
+    public async Task<ActionResult<IEnumerable<DepartmentDto>>> GetDepartments([FromQuery] string? tenantId = null)
     {
-        try
-        {
-            var departments = await _departmentService.GetAllDepartmentsAsync();
-            return Ok(departments);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting departments");
-            return StatusCode(500, new { message = "An error occurred while getting departments" });
-        }
+        var tenantIdForRequest = HttpContext.RequestServices
+            .GetRequiredService<ITenantFilterService>()
+            .ResolveTenantIdForRequest(IsSuperAdmin, tenantId);
+
+        return await HandleCollectionResultAsync(
+            () => _departmentService.GetAllDepartmentsAsync(tenantIdForRequest),
+            "getting departments"
+        );
     }
 
     /// <summary>
@@ -43,21 +42,11 @@ public class DepartmentsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<DepartmentDto>> GetDepartment(int id)
     {
-        try
-        {
-            var department = await _departmentService.GetDepartmentByIdAsync(id);
-            if (department == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(department);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting department with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while getting department" });
-        }
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _departmentService.GetDepartmentByIdAsync(id),
+            $"getting department with ID {id}",
+            "Department"
+        );
     }
 
     /// <summary>
@@ -66,74 +55,51 @@ public class DepartmentsController : ControllerBase
     [HttpGet("names")]
     public async Task<ActionResult<IEnumerable<string>>> GetDepartmentNames()
     {
-        try
-        {
-            var names = await _departmentService.GetDepartmentNamesAsync();
-            return Ok(names);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting department names");
-            return StatusCode(500, new { message = "An error occurred while getting department names" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _departmentService.GetDepartmentNamesAsync(),
+            "getting department names"
+        );
     }
 
     /// <summary>
     /// Create new department
     /// </summary>
     [HttpPost]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<DepartmentDto>> CreateDepartment([FromBody] CreateDepartmentDto createDepartmentDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
+            return BadRequest(ModelState);
+        }
 
-            var department = await _departmentService.CreateDepartmentAsync(createDepartmentDto);
-            return CreatedAtAction(nameof(GetDepartment), new { id = department.Id }, department);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while creating department");
-            return StatusCode(500, new { message = "An error occurred while creating department" });
-        }
+        return await HandleCreateResultAsync(
+            () => _departmentService.CreateDepartmentAsync(createDepartmentDto),
+            nameof(GetDepartment),
+            dept => dept.Id,
+            "creating department"
+        );
     }
 
     /// <summary>
     /// Update department
     /// </summary>
     [HttpPut("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult<DepartmentDto>> UpdateDepartment(int id, [FromBody] UpdateDepartmentDto updateDepartmentDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (!await _departmentService.DepartmentExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var department = await _departmentService.UpdateDepartmentAsync(id, updateDepartmentDto);
-            if (department == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(department);
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while updating department with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while updating department" });
-        }
+
+        return await HandleUpdateResultAsync(
+            () => _departmentService.DepartmentExistsAsync(id),
+            () => _departmentService.UpdateDepartmentAsync(id, updateDepartmentDto),
+            id,
+            "updating department",
+            "Department"
+        );
     }
 
     /// <summary>
@@ -160,7 +126,7 @@ public class DepartmentsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "An error occurred while assigning head of department. Department ID: {Id}, Employee ID: {EmployeeId}", id, employeeId);
+            Logger.LogError(ex, "An error occurred while assigning head of department. Department ID: {Id}, Employee ID: {EmployeeId}", id, employeeId);
             return StatusCode(500, new { message = "An error occurred while assigning head of department" });
         }
     }
@@ -189,7 +155,7 @@ public class DepartmentsController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "An error occurred while removing head of department. Department ID: {Id}", id);
+            Logger.LogError(ex, "An error occurred while removing head of department. Department ID: {Id}", id);
             return StatusCode(500, new { message = "An error occurred while removing head of department" });
         }
     }
@@ -198,29 +164,16 @@ public class DepartmentsController : ControllerBase
     /// Delete department
     /// </summary>
     [HttpDelete("{id}")]
-    [Authorize(Roles = "SuperAdmin,Admin")]
+    [AuthorizeAdmin]
     public async Task<ActionResult> DeleteDepartment(int id)
     {
-        try
-        {
-            if (!await _departmentService.DepartmentExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var result = await _departmentService.DeleteDepartmentAsync(id);
-            if (!result)
-            {
-                return BadRequest();
-            }
-
-            return NoContent();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while deleting department with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while deleting department" });
-        }
+        return await HandleDeleteResultAsync(
+            () => _departmentService.DepartmentExistsAsync(id),
+            () => _departmentService.DeleteDepartmentAsync(id),
+            id,
+            "deleting department",
+            "Department"
+        );
     }
 }
 

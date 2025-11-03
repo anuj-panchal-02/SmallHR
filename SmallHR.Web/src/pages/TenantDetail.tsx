@@ -45,7 +45,7 @@ interface TenantDetail {
     endDate: string | null;
     createdAt: string;
   } | null;
-  subscriptions: Array<{
+  subscriptions?: Array<{
     id: number;
     planName: string;
     status: string;
@@ -55,7 +55,7 @@ interface TenantDetail {
     endDate: string | null;
     createdAt: string;
   }>;
-  recentLifecycleEvents: Array<{
+  recentLifecycleEvents?: Array<{
     eventType: string;
     eventDate: string;
     description: string | null;
@@ -97,10 +97,50 @@ export default function TenantDetail() {
     setLoading(true);
     try {
       const response = await api.get(`/admin/tenants/${id}`);
-      setTenant(response.data);
+      console.log('Tenant detail API Response:', response);
+      console.log('Tenant detail Response Data:', response.data);
+      console.log('Response Data Keys:', response.data ? Object.keys(response.data) : 'null');
+      
+      // Handle both camelCase and PascalCase property names
+      // Strongly-typed DTO will use PascalCase, but handle both for compatibility
+      const tenantData: TenantDetail = {
+        ...response.data,
+        id: response.data.id || response.data.Id || 0,
+        name: response.data.name || response.data.Name || '',
+        domain: response.data.domain ?? response.data.Domain ?? null,
+        status: response.data.status || response.data.Status || 'Unknown',
+        isActive: response.data.isActive ?? response.data.IsActive ?? false,
+        isSubscriptionActive: response.data.isSubscriptionActive ?? response.data.IsSubscriptionActive ?? false,
+        adminEmail: response.data.adminEmail ?? response.data.AdminEmail ?? null,
+        adminFirstName: response.data.adminFirstName ?? response.data.AdminFirstName ?? null,
+        adminLastName: response.data.adminLastName ?? response.data.AdminLastName ?? null,
+        createdAt: response.data.createdAt || response.data.CreatedAt || new Date().toISOString(),
+        updatedAt: response.data.updatedAt || response.data.UpdatedAt || response.data.createdAt || response.data.CreatedAt || new Date().toISOString(),
+        userCount: response.data.userCount ?? response.data.UserCount ?? 0,
+        employeeCount: response.data.employeeCount ?? response.data.EmployeeCount ?? 0,
+        usageMetrics: response.data.usageMetrics || response.data.UsageMetrics || null,
+        subscription: response.data.subscription || response.data.Subscription || null,
+        recentLifecycleEvents: response.data.recentLifecycleEvents || response.data.RecentLifecycleEvents || [],
+        subscriptions: response.data.subscriptions || response.data.Subscriptions || [],
+      };
+      
+      console.log('Processed tenant data:', tenantData);
+      console.log('Tenant name:', tenantData.name);
+      console.log('Subscriptions count:', tenantData.subscriptions?.length || 0);
+      console.log('Lifecycle events count:', tenantData.recentLifecycleEvents?.length || 0);
+      
+      // Ensure we have valid data
+      if (!tenantData.name) {
+        console.error('Tenant data is missing name:', tenantData);
+        notify.error('Failed to Load Tenant', 'Invalid tenant data received from server');
+        return;
+      }
+      
+      setTenant(tenantData);
     } catch (error: any) {
+      console.error('Error fetching tenant detail:', error);
+      console.error('Error response:', error.response?.data);
       notify.error('Failed to Load Tenant', error.response?.data?.message || 'Unable to fetch tenant details.');
-      console.error(error);
     } finally {
       setLoading(false);
     }
@@ -131,53 +171,96 @@ export default function TenantDetail() {
     try {
       const response = await api.post(`/admin/tenants/${tenant.id}/impersonate?durationMinutes=30`);
       
+      console.log('Impersonate response:', response);
+      console.log('Impersonate response.data:', response.data);
+      console.log('Impersonate response.data keys:', response.data ? Object.keys(response.data) : 'null');
+      
+      // Handle different response structures (result, value, or direct properties)
+      // Strongly-typed DTO will use PascalCase, but handle both for compatibility
+      const responseData = response.data.result || response.data.value || response.data;
+      console.log('Processed responseData:', responseData);
+      
+      // Handle both camelCase and PascalCase property names (DTO uses PascalCase)
+      const tenantData = responseData.tenant || responseData.Tenant || response.data.tenant || response.data.Tenant;
+      const impersonationToken = responseData.impersonationToken || responseData.ImpersonationToken || response.data.impersonationToken || response.data.ImpersonationToken;
+      const expiresAt = responseData.expiresAt || responseData.ExpiresAt || response.data.expiresAt || response.data.ExpiresAt;
+      const banner = responseData.banner || responseData.Banner || response.data.banner || response.data.Banner || responseData.message || responseData.Message;
+      
+      console.log('Extracted values:', { tenantData, impersonationToken, expiresAt, banner });
+      console.log('Tenant data structure:', tenantData);
+      console.log('Tenant data keys:', tenantData ? Object.keys(tenantData) : 'null');
+      
+      if (!tenantData) {
+        console.error('Tenant data not found in response. Full response:', JSON.stringify(response.data, null, 2));
+        notify.error('Impersonation Failed', 'Invalid response from server - tenant data missing');
+        return;
+      }
+      
+      if (!impersonationToken) {
+        console.error('Impersonation token not found in response. Full response:', JSON.stringify(response.data, null, 2));
+        notify.error('Impersonation Failed', 'Invalid response from server - impersonation token missing');
+        return;
+      }
+      
       // Store impersonation token
-      localStorage.setItem('impersonationToken', response.data.impersonationToken);
+      localStorage.setItem('impersonationToken', impersonationToken);
       localStorage.setItem('impersonatedTenant', JSON.stringify({
-        id: response.data.tenant.id,
-        name: response.data.tenant.name,
-        expiresAt: response.data.expiresAt,
+        id: tenantData.id || tenantData.Id,
+        name: tenantData.name || tenantData.Name,
+        expiresAt: expiresAt,
       }));
 
       // Update API client
-      api.defaults.headers.common['Authorization'] = `Bearer ${response.data.impersonationToken}`;
+      api.defaults.headers.common['Authorization'] = `Bearer ${impersonationToken}`;
 
-      notify.success('Impersonation Started', response.data.banner);
+      notify.success('Impersonation Started', banner || 'Impersonation started successfully');
       
       // Redirect to tenant dashboard or refresh
       window.location.href = '/dashboard';
     } catch (error: any) {
+      console.error('Impersonation error:', error);
+      console.error('Error response:', error.response?.data);
       notify.error('Impersonation Failed', error.response?.data?.message || 'Unable to impersonate tenant.');
-      console.error(error);
     }
   };
 
   const handleSuspend = async () => {
-    if (!tenant) return;
+    if (!tenant || !tenant.id) {
+      console.error('Cannot suspend: tenant is null or missing id');
+      return;
+    }
 
     try {
       await api.post(`/admin/tenants/${tenant.id}/suspend`);
-      notify.success('Tenant Suspended', `${tenant.name} has been suspended.`);
+      notify.success('Tenant Suspended', `${tenant.name || 'Tenant'} has been suspended.`);
       fetchTenantDetail();
     } catch (error: any) {
       notify.error('Failed to Suspend', error.response?.data?.message || 'Unable to suspend tenant.');
+      console.error(error);
     }
   };
 
   const handleResume = async () => {
-    if (!tenant) return;
+    if (!tenant || !tenant.id) {
+      console.error('Cannot resume: tenant is null or missing id');
+      return;
+    }
 
     try {
       await api.post(`/admin/tenants/${tenant.id}/resume`);
-      notify.success('Tenant Resumed', `${tenant.name} has been resumed.`);
+      notify.success('Tenant Resumed', `${tenant.name || 'Tenant'} has been resumed.`);
       fetchTenantDetail();
     } catch (error: any) {
       notify.error('Failed to Resume', error.response?.data?.message || 'Unable to resume tenant.');
+      console.error(error);
     }
   };
 
   const handleGetAdminSetupLink = async () => {
-    if (!tenant) return;
+    if (!tenant || !tenant.id) {
+      console.error('Cannot get admin setup link: tenant is null or missing id');
+      return;
+    }
 
     try {
       const response = await api.get(`/admin/tenants/${tenant.id}/admin-setup-link`);
@@ -269,7 +352,18 @@ export default function TenantDetail() {
     return <Tag color={config.color}>{status}</Tag>;
   };
 
-  const subscriptionColumns: ColumnsType<TenantDetail['subscriptions'][0]> = [
+  type SubscriptionItem = {
+    id: number;
+    planName: string;
+    status: string;
+    price: number;
+    billingPeriod: string;
+    startDate: string;
+    endDate: string | null;
+    createdAt: string;
+  };
+  
+  const subscriptionColumns: ColumnsType<SubscriptionItem> = [
     {
       title: 'Plan',
       dataIndex: 'planName',
@@ -497,7 +591,7 @@ export default function TenantDetail() {
           <Tabs.TabPane tab="Subscription History" key="subscriptions">
             <Table
               columns={subscriptionColumns}
-              dataSource={tenant?.subscriptions || []}
+              dataSource={(tenant?.subscriptions || []) as SubscriptionItem[]}
               rowKey="id"
               pagination={false}
             />
@@ -505,10 +599,10 @@ export default function TenantDetail() {
 
           <Tabs.TabPane tab="Lifecycle Events" key="events">
             <Timeline>
-              {tenant?.recentLifecycleEvents.map((event, index) => (
-                <Timeline.Item key={index} color={event.eventType === 'Activated' ? 'green' : 'blue'}>
-                  <p><strong>{event.eventType}</strong> - {new Date(event.eventDate).toLocaleString()}</p>
-                  {event.description && <p>{event.description}</p>}
+              {(tenant?.recentLifecycleEvents || []).map((event: any, index: number) => (
+                <Timeline.Item key={index} color={event.eventType === 'Activated' || event.EventType === 'Activated' ? 'green' : 'blue'}>
+                  <p><strong>{event.eventType || event.EventType}</strong> - {new Date(event.eventDate || event.EventDate).toLocaleString()}</p>
+                  {(event.description || event.Description) && <p>{event.description || event.Description}</p>}
                 </Timeline.Item>
               ))}
             </Timeline>

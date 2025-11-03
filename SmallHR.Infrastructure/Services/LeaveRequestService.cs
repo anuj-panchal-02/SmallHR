@@ -24,9 +24,9 @@ public class LeaveRequestService : ILeaveRequestService
         _tenantProvider = tenantProvider;
     }
 
-    public async Task<IEnumerable<LeaveRequestDto>> GetAllLeaveRequestsAsync()
+    public async Task<IEnumerable<LeaveRequestDto>> GetAllLeaveRequestsAsync(string? tenantId = null)
     {
-        var leaveRequests = await _leaveRequestRepository.GetAllAsync();
+        var leaveRequests = await _leaveRequestRepository.GetAllAsync(tenantId);
         return _mapper.Map<IEnumerable<LeaveRequestDto>>(leaveRequests);
     }
 

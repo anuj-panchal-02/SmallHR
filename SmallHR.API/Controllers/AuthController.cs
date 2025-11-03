@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Hosting;
+using SmallHR.API.Base;
 using SmallHR.Core.DTOs.Auth;
 using SmallHR.Core.Entities;
 using SmallHR.Core.Interfaces;
@@ -10,12 +11,11 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class AuthController : ControllerBase
+public class AuthController : BaseApiController
 {
     private readonly IAuthService _authService;
     private readonly UserManager<User> _userManager;
     private readonly IEmailService _emailService;
-    private readonly ILogger<AuthController> _logger;
     private readonly IHostEnvironment _environment;
 
     public AuthController(
@@ -23,12 +23,11 @@ public class AuthController : ControllerBase
         UserManager<User> userManager,
         IEmailService emailService,
         ILogger<AuthController> logger, 
-        IHostEnvironment environment)
+        IHostEnvironment environment) : base(logger)
     {
         _authService = authService;
         _userManager = userManager;
         _emailService = emailService;
-        _logger = logger;
         _environment = environment;
     }
 
@@ -36,15 +35,15 @@ public class AuthController : ControllerBase
     /// Login user
     /// </summary>
     [HttpPost("login")]
-    public async Task<ActionResult<AuthResponseDto>> Login(LoginDto loginDto)
+    public async Task<ActionResult<object>> Login(LoginDto loginDto)
     {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
         try
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
             var result = await _authService.LoginAsync(loginDto);
             
             // Set httpOnly cookies for security (prevent XSS attacks on tokens)
@@ -63,14 +62,14 @@ public class AuthController : ControllerBase
         {
             // Sanitize email: only log first 3 characters and domain
             var sanitizedEmail = SanitizeEmail(loginDto.Email);
-            _logger.LogWarning("Login failed for email: {Email}, Error: {Error}", sanitizedEmail, ex.Message);
+            Logger.LogWarning("Login failed for email: {Email}, Error: {Error}", sanitizedEmail, ex.Message);
             return Unauthorized(new { message = ex.Message });
         }
         catch (Exception ex)
         {
             var sanitizedEmail = SanitizeEmail(loginDto.Email);
-            _logger.LogError(ex, "An error occurred during login for email: {Email}", sanitizedEmail);
-            return StatusCode(500, new { message = "An error occurred during login" });
+            Logger.LogError(ex, "An error occurred during login for email: {Email}", sanitizedEmail);
+            return CreateErrorResponse("An error occurred during login", ex);
         }
     }
 
@@ -78,15 +77,15 @@ public class AuthController : ControllerBase
     /// Register new user
     /// </summary>
     [HttpPost("register")]
-    public async Task<ActionResult<AuthResponseDto>> Register(RegisterDto registerDto)
+    public async Task<ActionResult<object>> Register(RegisterDto registerDto)
     {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
         try
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
             var result = await _authService.RegisterAsync(registerDto);
             
             // Set httpOnly cookies for security
@@ -104,14 +103,14 @@ public class AuthController : ControllerBase
         catch (InvalidOperationException ex)
         {
             var sanitizedEmail = SanitizeEmail(registerDto.Email);
-            _logger.LogWarning("Registration failed for email: {Email}, Error: {Error}", sanitizedEmail, ex.Message);
-            return BadRequest(new { message = ex.Message });
+            Logger.LogWarning("Registration failed for email: {Email}, Error: {Error}", sanitizedEmail, ex.Message);
+            return CreateBadRequestResponse(ex.Message);
         }
         catch (Exception ex)
         {
             var sanitizedEmail = SanitizeEmail(registerDto.Email);
-            _logger.LogError(ex, "An error occurred during registration for email: {Email}", sanitizedEmail);
-            return StatusCode(500, new { message = "An error occurred during registration" });
+            Logger.LogError(ex, "An error occurred during registration for email: {Email}", sanitizedEmail);
+            return CreateErrorResponse("An error occurred during registration", ex);
         }
     }
 
@@ -119,15 +118,15 @@ public class AuthController : ControllerBase
     /// Refresh JWT token
     /// </summary>
     [HttpPost("refresh-token")]
-    public async Task<ActionResult<AuthResponseDto>> RefreshToken(RefreshTokenDto refreshTokenDto)
+    public async Task<ActionResult<object>> RefreshToken(RefreshTokenDto refreshTokenDto)
     {
+        if (!ModelState.IsValid)
+        {
+            return BadRequest(ModelState);
+        }
+
         try
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
             var result = await _authService.RefreshTokenAsync(refreshTokenDto);
             
             // Set httpOnly cookies with new tokens
@@ -144,13 +143,13 @@ public class AuthController : ControllerBase
         }
         catch (UnauthorizedAccessException ex)
         {
-            _logger.LogWarning("Token refresh failed: {Error}", ex.Message);
+            Logger.LogWarning("Token refresh failed: {Error}", ex.Message);
             return Unauthorized(new { message = ex.Message });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "An error occurred during token refresh");
-            return StatusCode(500, new { message = "An error occurred during token refresh" });
+            Logger.LogError(ex, "An error occurred during token refresh");
+            return CreateErrorResponse("An error occurred during token refresh", ex);
         }
     }
 
@@ -159,28 +158,26 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("revoke-token")]
     [Authorize]
-    public async Task<ActionResult> RevokeToken(RefreshTokenDto refreshTokenDto)
+    public async Task<ActionResult<object>> RevokeToken(RefreshTokenDto refreshTokenDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            var result = await _authService.RevokeTokenAsync(refreshTokenDto.RefreshToken);
-            if (!result)
-            {
-                return BadRequest(new { message = "Invalid refresh token" });
-            }
-
-            return Ok(new { message = "Token revoked successfully" });
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during token revocation");
-            return StatusCode(500, new { message = "An error occurred during token revocation" });
-        }
+
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var result = await _authService.RevokeTokenAsync(refreshTokenDto.RefreshToken);
+                if (!result)
+                {
+                    throw new InvalidOperationException("Invalid refresh token");
+                }
+
+                return new { message = "Token revoked successfully" };
+            },
+            "revoking token"
+        );
     }
 
     /// <summary>
@@ -190,27 +187,17 @@ public class AuthController : ControllerBase
     [Authorize]
     public async Task<ActionResult<UserDto>> GetCurrentUser()
     {
-        try
+        var userId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+        if (string.IsNullOrEmpty(userId))
         {
-            var userId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
-            if (string.IsNullOrEmpty(userId))
-            {
-                return Unauthorized();
-            }
-
-            var user = await _authService.GetUserByIdAsync(userId);
-            if (user == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(user);
+            return Unauthorized();
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting current user");
-            return StatusCode(500, new { message = "An error occurred while getting current user" });
-        }
+
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _authService.GetUserByIdAsync(userId),
+            "getting current user",
+            "User"
+        );
     }
     
     /// <summary>
@@ -229,41 +216,39 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("verify-email")]
     [AllowAnonymous]
-    public async Task<ActionResult> VerifyEmail([FromQuery] string token, [FromQuery] string userId)
+    public async Task<ActionResult<object>> VerifyEmail([FromQuery] string token, [FromQuery] string userId)
     {
-        try
+        if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(userId))
         {
-            if (string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(userId))
-            {
-                return BadRequest(new { message = "Invalid verification link" });
-            }
-
-            var user = await _userManager.FindByIdAsync(userId);
-            if (user == null)
-            {
-                return BadRequest(new { message = "Invalid verification link" });
-            }
-
-            if (user.EmailConfirmed)
-            {
-                return Ok(new { message = "Email already verified" });
-            }
-
-            var result = await _userManager.ConfirmEmailAsync(user, token);
-            if (result.Succeeded)
-            {
-                _logger.LogInformation("Email verified successfully for user: {Email}", user.Email);
-                return Ok(new { message = "Email verified successfully" });
-            }
-
-            _logger.LogWarning("Email verification failed for user: {Email}", user.Email);
-            return BadRequest(new { message = "Invalid or expired verification token" });
+            return CreateBadRequestResponse("Invalid verification link");
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during email verification");
-            return StatusCode(500, new { message = "An error occurred during email verification" });
-        }
+
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var user = await _userManager.FindByIdAsync(userId);
+                if (user == null)
+                {
+                    throw new ArgumentException("Invalid verification link");
+                }
+
+                if (user.EmailConfirmed)
+                {
+                    return new { message = "Email already verified" };
+                }
+
+                var result = await _userManager.ConfirmEmailAsync(user, token);
+                if (!result.Succeeded)
+                {
+                    Logger.LogWarning("Email verification failed for user: {Email}", user.Email);
+                    throw new InvalidOperationException("Invalid or expired verification token");
+                }
+
+                Logger.LogInformation("Email verified successfully for user: {Email}", user.Email);
+                return new { message = "Email verified successfully" };
+            },
+            "verifying email"
+        );
     }
     
     /// <summary>
@@ -271,33 +256,31 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("resend-verification")]
     [AllowAnonymous]
-    public async Task<ActionResult> ResendVerificationEmail([FromBody] ResendVerificationDto dto)
+    public async Task<ActionResult<object>> ResendVerificationEmail([FromBody] ResendVerificationDto dto)
     {
-        try
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                // Don't reveal if email exists (security best practice)
-                return Ok(new { message = "If email exists, verification link sent" });
-            }
+                var user = await _userManager.FindByEmailAsync(dto.Email);
+                if (user == null)
+                {
+                    // Don't reveal if email exists (security best practice)
+                    return new { message = "If email exists, verification link sent" };
+                }
 
-            if (user.EmailConfirmed)
-            {
-                return Ok(new { message = "Email already verified" });
-            }
+                if (user.EmailConfirmed)
+                {
+                    return new { message = "Email already verified" };
+                }
 
-            var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
-            await _emailService.SendVerificationEmailAsync(user.Email!, token, user.Id);
+                var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
+                await _emailService.SendVerificationEmailAsync(user.Email!, token, user.Id);
 
-            _logger.LogInformation("Verification email resent to: {Email}", dto.Email);
-            return Ok(new { message = "If email exists, verification link sent" });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while resending verification email");
-            return StatusCode(500, new { message = "An error occurred while sending verification email" });
-        }
+                Logger.LogInformation("Verification email resent to: {Email}", dto.Email);
+                return new { message = "If email exists, verification link sent" };
+            },
+            "resending verification email"
+        );
     }
     
     /// <summary>
@@ -305,28 +288,26 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("forgot-password")]
     [AllowAnonymous]
-    public async Task<ActionResult> ForgotPassword([FromBody] ForgotPasswordDto dto)
+    public async Task<ActionResult<object>> ForgotPassword([FromBody] ForgotPasswordDto dto)
     {
-        try
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                // Don't reveal if email exists (security best practice)
-                return Ok(new { message = "If email exists, reset instructions sent" });
-            }
+                var user = await _userManager.FindByEmailAsync(dto.Email);
+                if (user == null)
+                {
+                    // Don't reveal if email exists (security best practice)
+                    return new { message = "If email exists, reset instructions sent" };
+                }
 
-            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-            await _emailService.SendPasswordResetEmailAsync(user.Email!, token);
+                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+                await _emailService.SendPasswordResetEmailAsync(user.Email!, token);
 
-            _logger.LogInformation("Password reset email sent to: {Email}", dto.Email);
-            return Ok(new { message = "If email exists, reset instructions sent" });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during password reset request");
-            return StatusCode(500, new { message = "An error occurred during password reset request" });
-        }
+                Logger.LogInformation("Password reset email sent to: {Email}", dto.Email);
+                return new { message = "If email exists, reset instructions sent" };
+            },
+            "requesting password reset"
+        );
     }
     
     /// <summary>
@@ -334,40 +315,35 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("reset-password")]
     [AllowAnonymous]
-    public async Task<ActionResult> ResetPassword([FromBody] ResetPasswordDto dto)
+    public async Task<ActionResult<object>> ResetPassword([FromBody] ResetPasswordDto dto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
-            {
-                return BadRequest(new { message = "Invalid request" });
-            }
-
-            var result = await _userManager.ResetPasswordAsync(user, dto.Token, dto.NewPassword);
-            if (!result.Succeeded)
-            {
-                var errors = result.Errors.Select(e => e.Description).ToList();
-                _logger.LogWarning("Password reset failed for {Email}: {Errors}", dto.Email, string.Join(", ", errors));
-                return BadRequest(new { 
-                    message = "Password reset failed", 
-                    errors = errors 
-                });
-            }
-
-            _logger.LogInformation("Password reset successful for: {Email}", dto.Email);
-            return Ok(new { message = "Password reset successfully" });
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred during password reset");
-            return StatusCode(500, new { message = "An error occurred during password reset" });
-        }
+
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var user = await _userManager.FindByEmailAsync(dto.Email);
+                if (user == null)
+                {
+                    throw new ArgumentException("Invalid request");
+                }
+
+                var result = await _userManager.ResetPasswordAsync(user, dto.Token, dto.NewPassword);
+                if (!result.Succeeded)
+                {
+                    var errors = result.Errors.Select(e => e.Description).ToList();
+                    Logger.LogWarning("Password reset failed for {Email}: {Errors}", dto.Email, string.Join(", ", errors));
+                    throw new InvalidOperationException($"Password reset failed: {string.Join(", ", errors)}");
+                }
+
+                Logger.LogInformation("Password reset successful for: {Email}", dto.Email);
+                return new { message = "Password reset successfully" };
+            },
+            "resetting password"
+        );
     }
     
     /// <summary>
@@ -376,52 +352,47 @@ public class AuthController : ControllerBase
     /// </summary>
     [HttpPost("setup-password")]
     [AllowAnonymous]
-    public async Task<ActionResult> SetupPassword([FromBody] SetupPasswordDto dto)
+    public async Task<ActionResult<object>> SetupPassword([FromBody] SetupPasswordDto dto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (string.IsNullOrWhiteSpace(dto.UserId) || string.IsNullOrWhiteSpace(dto.Token) || string.IsNullOrWhiteSpace(dto.NewPassword))
-            {
-                return BadRequest(new { message = "UserId, token, and new password are required" });
-            }
-
-            var user = await _userManager.FindByIdAsync(dto.UserId);
-            if (user == null)
-            {
-                return BadRequest(new { message = "Invalid setup link" });
-            }
-
-            var result = await _userManager.ResetPasswordAsync(user, Uri.UnescapeDataString(dto.Token), dto.NewPassword);
-            if (!result.Succeeded)
-            {
-                var errors = result.Errors.Select(e => e.Description).ToList();
-                _logger.LogWarning("Password setup failed for user {UserId}: {Errors}", dto.UserId, string.Join(", ", errors));
-                return BadRequest(new { 
-                    message = "Password setup failed", 
-                    errors = errors 
-                });
-            }
-
-            // Optionally confirm email if not already confirmed
-            if (!user.EmailConfirmed)
-            {
-                user.EmailConfirmed = true;
-                await _userManager.UpdateAsync(user);
-            }
-
-            _logger.LogInformation("Password setup successful for user: {UserId} ({Email})", dto.UserId, user.Email);
-            return Ok(new { message = "Password set successfully. You can now login." });
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
+
+        if (string.IsNullOrWhiteSpace(dto.UserId) || string.IsNullOrWhiteSpace(dto.Token) || string.IsNullOrWhiteSpace(dto.NewPassword))
         {
-            _logger.LogError(ex, "An error occurred during password setup");
-            return StatusCode(500, new { message = "An error occurred during password setup" });
+            return CreateBadRequestResponse("UserId, token, and new password are required");
         }
+
+        return await HandleServiceResultAsync(
+            async () =>
+            {
+                var user = await _userManager.FindByIdAsync(dto.UserId);
+                if (user == null)
+                {
+                    throw new ArgumentException("Invalid setup link");
+                }
+
+                var result = await _userManager.ResetPasswordAsync(user, Uri.UnescapeDataString(dto.Token), dto.NewPassword);
+                if (!result.Succeeded)
+                {
+                    var errors = result.Errors.Select(e => e.Description).ToList();
+                    Logger.LogWarning("Password setup failed for user {UserId}: {Errors}", dto.UserId, string.Join(", ", errors));
+                    throw new InvalidOperationException($"Password setup failed: {string.Join(", ", errors)}");
+                }
+
+                // Optionally confirm email if not already confirmed
+                if (!user.EmailConfirmed)
+                {
+                    user.EmailConfirmed = true;
+                    await _userManager.UpdateAsync(user);
+                }
+
+                Logger.LogInformation("Password setup successful for user: {UserId} ({Email})", dto.UserId, user.Email);
+                return new { message = "Password set successfully. You can now login." };
+            },
+            "setting up password"
+        );
     }
     
     /// <summary>

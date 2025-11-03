@@ -11,4 +11,5 @@ public interface ILeaveRequestRepository : IGenericRepository<LeaveRequest>
     Task<IEnumerable<LeaveRequest>> GetApprovedRequestsAsync();
     Task<IEnumerable<LeaveRequest>> GetRejectedRequestsAsync();
     Task<int> GetTotalLeaveDaysAsync(int employeeId, string leaveType, int year);
+    Task<IEnumerable<LeaveRequest>> GetAllAsync(string? tenantId = null);
 }

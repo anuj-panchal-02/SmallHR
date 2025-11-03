@@ -138,9 +138,9 @@ public class ApplicationDbContext : IdentityDbContext<User>
                 .WithMany(u => u.Employees)
                 .HasForeignKey(e => e.UserId)
                 .OnDelete(DeleteBehavior.SetNull);
-            // Query filter for tenant isolation
+            // Query filter: tenant isolation + soft delete
             // Bypassed temporarily for SuperAdmin on admin endpoints via HttpContext.Items["BypassTenantQueryFilters"]
-            entity.HasQueryFilter(e => ShouldBypassTenantQueryFilters() || e.TenantId == _tenantProvider.TenantId);
+            entity.HasQueryFilter(e => (ShouldBypassTenantQueryFilters() || e.TenantId == _tenantProvider.TenantId) && !e.IsDeleted);
         });
 
         // LeaveRequest configuration
@@ -160,8 +160,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
                 .HasForeignKey(lr => lr.EmployeeId)
                 .OnDelete(DeleteBehavior.Cascade);
             entity.HasIndex(lr => lr.TenantId);
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(lr => ShouldBypassTenantQueryFilters() || lr.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(lr => (ShouldBypassTenantQueryFilters() || lr.TenantId == _tenantProvider.TenantId) && !lr.IsDeleted);
         });
 
         // Attendance configuration
@@ -179,8 +179,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
 
             entity.HasIndex(a => new { a.EmployeeId, a.Date }).IsUnique();
             entity.HasIndex(a => a.TenantId);
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(a => ShouldBypassTenantQueryFilters() || a.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(a => (ShouldBypassTenantQueryFilters() || a.TenantId == _tenantProvider.TenantId) && !a.IsDeleted);
         });
 
         // User configuration
@@ -209,8 +209,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.Property(rp => rp.Description).HasMaxLength(500);
 
             entity.HasIndex(rp => new { rp.TenantId, rp.RoleName, rp.PagePath }).IsUnique();
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(rp => ShouldBypassTenantQueryFilters() || rp.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(rp => (ShouldBypassTenantQueryFilters() || rp.TenantId == _tenantProvider.TenantId) && !rp.IsDeleted);
         });
 
         // Module configuration
@@ -225,8 +225,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.Property(m => m.Description).HasMaxLength(500);
             entity.HasIndex(m => new { m.TenantId, m.Path }).IsUnique();
             entity.HasIndex(m => new { m.TenantId, m.ParentPath, m.DisplayOrder });
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(m => ShouldBypassTenantQueryFilters() || m.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(m => (ShouldBypassTenantQueryFilters() || m.TenantId == _tenantProvider.TenantId) && !m.IsDeleted);
         });
 
         // Tenant configuration
@@ -259,8 +259,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.HasIndex(d => new { d.TenantId, d.Name }).IsUnique();
             entity.HasIndex(d => d.TenantId);
             entity.HasIndex(d => d.HeadOfDepartmentId);
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(d => ShouldBypassTenantQueryFilters() || d.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(d => (ShouldBypassTenantQueryFilters() || d.TenantId == _tenantProvider.TenantId) && !d.IsDeleted);
         });
 
         // Position configuration
@@ -279,8 +279,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.HasIndex(p => new { p.TenantId, p.Title }).IsUnique();
             entity.HasIndex(p => p.TenantId);
             entity.HasIndex(p => p.DepartmentId);
-            // Query filter for tenant isolation
-            entity.HasQueryFilter(p => ShouldBypassTenantQueryFilters() || p.TenantId == _tenantProvider.TenantId);
+            // Query filter: tenant isolation + soft delete
+            entity.HasQueryFilter(p => (ShouldBypassTenantQueryFilters() || p.TenantId == _tenantProvider.TenantId) && !p.IsDeleted);
         });
 
         // Subscription configuration
@@ -309,6 +309,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.HasIndex(s => s.ExternalSubscriptionId);
             entity.HasIndex(s => s.ExternalCustomerId);
             entity.HasIndex(s => s.Status);
+            // Soft delete filter
+            entity.HasQueryFilter(t => !t.IsDeleted);
         });
 
         // SubscriptionPlan configuration
@@ -331,6 +333,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             entity.HasIndex(sp => sp.Name).IsUnique();
             entity.HasIndex(sp => sp.IsActive);
             entity.HasIndex(sp => sp.IsVisible);
+            // Soft delete filter
+            entity.HasQueryFilter(a => !a.IsDeleted);
         });
 
         // Feature configuration
@@ -346,6 +350,8 @@ public class ApplicationDbContext : IdentityDbContext<User>
             
             entity.HasIndex(f => f.Key).IsUnique();
             entity.HasIndex(f => f.Category);
+            // Soft delete filter
+            entity.HasQueryFilter(w => !w.IsDeleted);
         });
 
         // SubscriptionPlanFeature configuration (Many-to-Many)
@@ -549,6 +555,13 @@ public class ApplicationDbContext : IdentityDbContext<User>
         var currentTenantId = _tenantProvider.TenantId;
         foreach (var entry in ChangeTracker.Entries())
         {
+            // Global soft-delete: convert hard deletes on BaseEntity to soft deletes
+            if (entry.State == EntityState.Deleted && entry.Entity is SmallHR.Core.Entities.BaseEntity be)
+            {
+                entry.State = EntityState.Modified;
+                be.IsDeleted = true;
+            }
+
             // Handle User entity separately - protect against accidental deletion or TenantId modification
             if (entry.Entity is User user)
             {
@@ -597,10 +610,23 @@ public class ApplicationDbContext : IdentityDbContext<User>
             var tenantProp = entry.Properties.FirstOrDefault(p => p.Metadata.Name == "TenantId");
             if (tenantProp != null)
             {
+                // Skip entities with int TenantId (Alert, TenantUsageMetrics) - these are managed separately
+                // Only process entities with string TenantId (Employee, Department, etc.)
+                if (tenantProp.Metadata.ClrType != typeof(string))
+                {
+                    continue;
+                }
+                
                 // For new entities, set the tenant ID
                 if (entry.State == EntityState.Added)
                 {
-                    tenantProp.CurrentValue = currentTenantId;
+                    var currentValue = tenantProp.CurrentValue?.ToString();
+                    // Always set TenantId for security - override if different from current tenant
+                    // This ensures tenant isolation is enforced
+                    if (string.IsNullOrEmpty(currentValue) || currentValue != currentTenantId)
+                    {
+                        tenantProp.CurrentValue = currentTenantId;
+                    }
                 }
                 // For modified entities, prevent tenant ID changes (critical security check)
                 else if (entry.State == EntityState.Modified)

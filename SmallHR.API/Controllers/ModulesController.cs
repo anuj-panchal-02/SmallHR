@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
 using SmallHR.Infrastructure.Data;
 using SmallHR.Core.Interfaces;
 
@@ -8,11 +9,15 @@ namespace SmallHR.API.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
-public class ModulesController : ControllerBase
+public class ModulesController : BaseApiController
 {
     private readonly ApplicationDbContext _db;
     private readonly ITenantProvider _tenantProvider;
-    public ModulesController(ApplicationDbContext db, ITenantProvider tenantProvider)
+    
+    public ModulesController(
+        ApplicationDbContext db, 
+        ITenantProvider tenantProvider,
+        ILogger<ModulesController> logger) : base(logger)
     {
         _db = db;
         _tenantProvider = tenantProvider;
@@ -20,58 +25,67 @@ public class ModulesController : ControllerBase
 
     [HttpGet]
     [Authorize]
-    public async Task<IActionResult> GetModules()
+    public async Task<ActionResult<object>> GetModules()
     {
-        // Check if user is SuperAdmin
-        var isSuperAdmin = User.IsInRole("SuperAdmin");
-        
-        // SuperAdmin gets all modules (no TenantId filter)
-        // Regular users get modules filtered by their TenantId
-        var query = _db.Modules.AsNoTracking().Where(m => m.IsActive && !m.IsDeleted);
-        
-        if (!isSuperAdmin)
-        {
-            // For non-SuperAdmin users, filter by TenantId
-            var tenantId = _tenantProvider.TenantId;
-            query = query.Where(m => m.TenantId == tenantId);
-        }
-        // SuperAdmin: no TenantId filter, gets all modules
-        
-        var modules = await query
-            .OrderBy(m => m.ParentPath)
-            .ThenBy(m => m.DisplayOrder)
-            .ToListAsync();
-
-        var byPath = modules.ToDictionary(m => m.Path, m => new
-        {
-            name = m.Name,
-            path = m.Path,
-            description = m.Description,
-            icon = m.Icon,
-            children = new List<object>()
-        });
-
-        var roots = new List<object>();
-        foreach (var m in modules)
-        {
-            if (!string.IsNullOrWhiteSpace(m.ParentPath) && byPath.ContainsKey(m.ParentPath))
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                ((List<object>)byPath[m.ParentPath].children!).Add(byPath[m.Path]);
-            }
-            else
-            {
-                roots.Add(byPath[m.Path]);
-            }
-        }
+                // Check if user is SuperAdmin
+                var isSuperAdmin = IsSuperAdmin;
+                
+                // SuperAdmin gets all modules (no TenantId filter)
+                // Regular users get modules filtered by their TenantId
+                var query = _db.Modules.AsNoTracking().Where(m => m.IsActive && !m.IsDeleted);
+                
+                if (!isSuperAdmin)
+                {
+                    // For non-SuperAdmin users, filter by TenantId
+                    var tenantId = _tenantProvider.TenantId;
+                    query = query.Where(m => m.TenantId == tenantId);
+                }
+                // SuperAdmin: no TenantId filter, gets all modules
+                
+                var modules = await query
+                    .OrderBy(m => m.ParentPath)
+                    .ThenBy(m => m.DisplayOrder)
+                    .ToListAsync();
 
-        return Ok(roots);
+                var byPath = modules.ToDictionary(m => m.Path, m => new
+                {
+                    name = m.Name,
+                    path = m.Path,
+                    description = m.Description,
+                    icon = m.Icon,
+                    children = new List<object>()
+                });
+
+                var roots = new List<object>();
+                foreach (var m in modules)
+                {
+                    if (!string.IsNullOrWhiteSpace(m.ParentPath) && byPath.ContainsKey(m.ParentPath))
+                    {
+                        ((List<object>)byPath[m.ParentPath].children!).Add(byPath[m.Path]);
+                    }
+                    else
+                    {
+                        roots.Add(byPath[m.Path]);
+                    }
+                }
+
+                return (IEnumerable<object>)roots;
+            },
+            "getting modules"
+        );
     }
 
     [HttpPost("seed")]
     [Authorize]
-    public async Task<IActionResult> Seed()
+    public async Task<ActionResult<object>> Seed()
     {
-        if (await _db.Modules.AnyAsync()) return Ok(new { message = "Modules already exist" });
+        if (await _db.Modules.AnyAsync())
+        {
+            return Ok(new { message = "Modules already exist" });
+        }
 
         var now = DateTime.UtcNow;
         var tenantId = _tenantProvider.TenantId;
@@ -97,35 +111,41 @@ public class ModulesController : ControllerBase
 
     [HttpPost("add-missing")]
     [Authorize]
-    public async Task<IActionResult> AddMissingModules()
+    public async Task<ActionResult<object>> AddMissingModules()
     {
-        var tenantId = _tenantProvider.TenantId;
-        var now = DateTime.UtcNow;
-        int added = 0;
-
-        // Check and add Tenant Settings if missing
-        var tenantSettingsExists = await _db.Modules.AnyAsync(m => m.Path == "/tenant-settings" && m.TenantId == tenantId);
-        if (!tenantSettingsExists)
-        {
-            var tenantSettingsModule = new Core.Entities.Module
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                TenantId = tenantId,
-                Name = "Tenant Settings",
-                Path = "/tenant-settings",
-                ParentPath = null,
-                Icon = "apartment",
-                DisplayOrder = 98,
-                IsActive = true,
-                Description = "Manage tenants",
-                CreatedAt = now,
-                IsDeleted = false
-            };
-            await _db.Modules.AddAsync(tenantSettingsModule);
-            added++;
-        }
+                var tenantId = _tenantProvider.TenantId;
+                var now = DateTime.UtcNow;
+                int added = 0;
 
-        await _db.SaveChangesAsync();
-        return Ok(new { message = $"Added {added} missing module(s)" });
+                // Check and add Tenant Settings if missing
+                var tenantSettingsExists = await _db.Modules.AnyAsync(m => m.Path == "/tenant-settings" && m.TenantId == tenantId);
+                if (!tenantSettingsExists)
+                {
+                    var tenantSettingsModule = new Core.Entities.Module
+                    {
+                        TenantId = tenantId,
+                        Name = "Tenant Settings",
+                        Path = "/tenant-settings",
+                        ParentPath = null,
+                        Icon = "apartment",
+                        DisplayOrder = 98,
+                        IsActive = true,
+                        Description = "Manage tenants",
+                        CreatedAt = now,
+                        IsDeleted = false
+                    };
+                    await _db.Modules.AddAsync(tenantSettingsModule);
+                    added++;
+                }
+
+                await _db.SaveChangesAsync();
+                return new { message = $"Added {added} missing module(s)" };
+            },
+            "adding missing modules"
+        );
     }
 }
 

@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.DTOs.LeaveRequest;
 using SmallHR.Core.Interfaces;
 
@@ -8,34 +10,31 @@ namespace SmallHR.API.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
-public class LeaveRequestsController : ControllerBase
+public class LeaveRequestsController : BaseApiController
 {
     private readonly ILeaveRequestService _leaveRequestService;
-    private readonly ILogger<LeaveRequestsController> _logger;
 
     public LeaveRequestsController(ILeaveRequestService leaveRequestService, ILogger<LeaveRequestsController> logger)
+        : base(logger)
     {
         _leaveRequestService = leaveRequestService;
-        _logger = logger;
     }
 
     /// <summary>
     /// Get all leave requests
     /// </summary>
     [HttpGet]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
-    public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetLeaveRequests()
+    [AuthorizeHR]
+    public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetLeaveRequests([FromQuery] string? tenantId = null)
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetAllLeaveRequestsAsync();
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting leave requests");
-            return StatusCode(500, new { message = "An error occurred while getting leave requests" });
-        }
+        var tenantIdForRequest = HttpContext.RequestServices
+            .GetRequiredService<ITenantFilterService>()
+            .ResolveTenantIdForRequest(IsSuperAdmin, tenantId);
+
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetAllLeaveRequestsAsync(tenantIdForRequest),
+            "getting leave requests"
+        );
     }
 
     /// <summary>
@@ -44,21 +43,11 @@ public class LeaveRequestsController : ControllerBase
     [HttpGet("{id}")]
     public async Task<ActionResult<LeaveRequestDto>> GetLeaveRequest(int id)
     {
-        try
-        {
-            var leaveRequest = await _leaveRequestService.GetLeaveRequestByIdAsync(id);
-            if (leaveRequest == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(leaveRequest);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting leave request with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while getting leave request" });
-        }
+        return await HandleServiceResultOrNotFoundAsync(
+            () => _leaveRequestService.GetLeaveRequestByIdAsync(id),
+            $"getting leave request with ID {id}",
+            "LeaveRequest"
+        );
     }
 
     /// <summary>
@@ -67,16 +56,10 @@ public class LeaveRequestsController : ControllerBase
     [HttpGet("employee/{employeeId}")]
     public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetLeaveRequestsByEmployee(int employeeId)
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetLeaveRequestsByEmployeeIdAsync(employeeId);
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting leave requests for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting leave requests" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetLeaveRequestsByEmployeeIdAsync(employeeId),
+            $"getting leave requests for employee ID {employeeId}"
+        );
     }
 
     /// <summary>
@@ -85,21 +68,17 @@ public class LeaveRequestsController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<LeaveRequestDto>> CreateLeaveRequest(CreateLeaveRequestDto createLeaveRequestDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
+            return BadRequest(ModelState);
+        }
 
-            var leaveRequest = await _leaveRequestService.CreateLeaveRequestAsync(createLeaveRequestDto);
-            return CreatedAtAction(nameof(GetLeaveRequest), new { id = leaveRequest.Id }, leaveRequest);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while creating leave request");
-            return StatusCode(500, new { message = "An error occurred while creating leave request" });
-        }
+        return await HandleCreateResultAsync(
+            () => _leaveRequestService.CreateLeaveRequestAsync(createLeaveRequestDto),
+            nameof(GetLeaveRequest),
+            lr => lr.Id,
+            "creating leave request"
+        );
     }
 
     /// <summary>
@@ -108,66 +87,43 @@ public class LeaveRequestsController : ControllerBase
     [HttpPut("{id}")]
     public async Task<ActionResult<LeaveRequestDto>> UpdateLeaveRequest(int id, UpdateLeaveRequestDto updateLeaveRequestDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (!await _leaveRequestService.LeaveRequestExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var leaveRequest = await _leaveRequestService.UpdateLeaveRequestAsync(id, updateLeaveRequestDto);
-            if (leaveRequest == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(leaveRequest);
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while updating leave request with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while updating leave request" });
-        }
+
+        return await HandleUpdateResultAsync(
+            () => _leaveRequestService.LeaveRequestExistsAsync(id),
+            () => _leaveRequestService.UpdateLeaveRequestAsync(id, updateLeaveRequestDto),
+            id,
+            "updating leave request",
+            "LeaveRequest"
+        );
     }
 
     /// <summary>
     /// Approve or reject leave request
     /// </summary>
     [HttpPut("{id}/approve")]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<LeaveRequestDto>> ApproveLeaveRequest(int id, ApproveLeaveRequestDto approveLeaveRequestDto)
     {
-        try
+        if (!ModelState.IsValid)
         {
-            if (!ModelState.IsValid)
-            {
-                return BadRequest(ModelState);
-            }
-
-            if (!await _leaveRequestService.LeaveRequestExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var approvedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? "Unknown";
-            var leaveRequest = await _leaveRequestService.ApproveLeaveRequestAsync(id, approveLeaveRequestDto, approvedBy);
-            if (leaveRequest == null)
-            {
-                return NotFound();
-            }
-
-            return Ok(leaveRequest);
+            return BadRequest(ModelState);
         }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while approving leave request with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while approving leave request" });
-        }
+
+        return await HandleUpdateResultAsync(
+            () => _leaveRequestService.LeaveRequestExistsAsync(id),
+            async () =>
+            {
+                var approvedBy = User.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value ?? "Unknown";
+                return await _leaveRequestService.ApproveLeaveRequestAsync(id, approveLeaveRequestDto, approvedBy);
+            },
+            id,
+            "approving leave request",
+            "LeaveRequest"
+        );
     }
 
     /// <summary>
@@ -176,26 +132,13 @@ public class LeaveRequestsController : ControllerBase
     [HttpDelete("{id}")]
     public async Task<ActionResult> DeleteLeaveRequest(int id)
     {
-        try
-        {
-            if (!await _leaveRequestService.LeaveRequestExistsAsync(id))
-            {
-                return NotFound();
-            }
-
-            var result = await _leaveRequestService.DeleteLeaveRequestAsync(id);
-            if (!result)
-            {
-                return BadRequest();
-            }
-
-            return NoContent();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while deleting leave request with ID: {Id}", id);
-            return StatusCode(500, new { message = "An error occurred while deleting leave request" });
-        }
+        return await HandleDeleteResultAsync(
+            () => _leaveRequestService.LeaveRequestExistsAsync(id),
+            () => _leaveRequestService.DeleteLeaveRequestAsync(id),
+            id,
+            "deleting leave request",
+            "LeaveRequest"
+        );
     }
 
     /// <summary>
@@ -205,75 +148,51 @@ public class LeaveRequestsController : ControllerBase
     [Authorize(Roles = "SuperAdmin,Admin,HR")]
     public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetPendingLeaveRequests()
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetPendingLeaveRequestsAsync();
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting pending leave requests");
-            return StatusCode(500, new { message = "An error occurred while getting pending leave requests" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetPendingLeaveRequestsAsync(),
+            "getting pending leave requests"
+        );
     }
 
     /// <summary>
     /// Get approved leave requests
     /// </summary>
     [HttpGet("approved")]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetApprovedLeaveRequests()
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetApprovedLeaveRequestsAsync();
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting approved leave requests");
-            return StatusCode(500, new { message = "An error occurred while getting approved leave requests" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetApprovedLeaveRequestsAsync(),
+            "getting approved leave requests"
+        );
     }
 
     /// <summary>
     /// Get rejected leave requests
     /// </summary>
     [HttpGet("rejected")]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetRejectedLeaveRequests()
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetRejectedLeaveRequestsAsync();
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting rejected leave requests");
-            return StatusCode(500, new { message = "An error occurred while getting rejected leave requests" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetRejectedLeaveRequestsAsync(),
+            "getting rejected leave requests"
+        );
     }
 
     /// <summary>
     /// Get leave requests by date range
     /// </summary>
     [HttpGet("by-date-range")]
-    [Authorize(Roles = "SuperAdmin,Admin,HR")]
+    [AuthorizeHR]
     public async Task<ActionResult<IEnumerable<LeaveRequestDto>>> GetLeaveRequestsByDateRange(
         [FromQuery] DateTime startDate, 
         [FromQuery] DateTime endDate)
     {
-        try
-        {
-            var leaveRequests = await _leaveRequestService.GetLeaveRequestsByDateRangeAsync(startDate, endDate);
-            return Ok(leaveRequests);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting leave requests by date range");
-            return StatusCode(500, new { message = "An error occurred while getting leave requests by date range" });
-        }
+        return await HandleCollectionResultAsync(
+            () => _leaveRequestService.GetLeaveRequestsByDateRangeAsync(startDate, endDate),
+            "getting leave requests by date range"
+        );
     }
 
     /// <summary>
@@ -282,15 +201,9 @@ public class LeaveRequestsController : ControllerBase
     [HttpGet("total-days/{employeeId}")]
     public async Task<ActionResult<int>> GetTotalLeaveDays(int employeeId, [FromQuery] string leaveType, [FromQuery] int year)
     {
-        try
-        {
-            var totalDays = await _leaveRequestService.GetTotalLeaveDaysAsync(employeeId, leaveType, year);
-            return Ok(new { totalDays });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while getting total leave days for employee ID: {EmployeeId}", employeeId);
-            return StatusCode(500, new { message = "An error occurred while getting total leave days" });
-        }
+        return await HandleServiceResultAsync(
+            async () => await _leaveRequestService.GetTotalLeaveDaysAsync(employeeId, leaveType, year),
+            $"getting total leave days for employee ID {employeeId}"
+        );
     }
 }

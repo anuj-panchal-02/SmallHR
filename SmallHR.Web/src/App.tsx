@@ -22,6 +22,7 @@ import TenantsList from './pages/TenantsList';
 import TenantDetail from './pages/TenantDetail';
 import BillingCenter from './pages/BillingCenter';
 import AlertsHub from './pages/AlertsHub';
+import UsageDashboard from './pages/UsageDashboard';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import './App.css';
 import { buildSemanticColors, buildSemanticColorsDark, applyCssVariables, getAntThemeFromSemantic, getStoredPaletteOrDefault, registerGlobalPaletteAPI } from './theme';
@@ -93,6 +94,7 @@ function AppShell() {
     if (path === '/admin/tenants/:id') return <TenantDetail />;
     if (path === '/admin/billing') return <BillingCenter />;
     if (path === '/admin/alerts') return <AlertsHub />;
+    if (path === '/admin/usage') return <UsageDashboard />;
     // Payroll pages
     if (path === '/payroll/reports') return <UnknownModule />;
     if (path === '/payroll/settings') return <UnknownModule />;
@@ -141,6 +143,16 @@ function AppShell() {
               <Route path="/setup-password" element={<SetupPassword />} />
               <Route path="/verify-email" element={<VerifyEmail />} />
               {/* Static dashboard route - always available */}
+              <Route
+                path="/admin/usage"
+                element={
+                  <AuthRoute>
+                    <MainLayout>
+                      <UsageDashboard />
+                    </MainLayout>
+                  </AuthRoute>
+                }
+              />
               <Route
                 path="/dashboard"
                 element={

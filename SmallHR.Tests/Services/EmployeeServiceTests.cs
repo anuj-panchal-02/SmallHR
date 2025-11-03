@@ -1,5 +1,4 @@
 using AutoMapper;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Moq;
@@ -18,8 +17,7 @@ public class EmployeeServiceTests
     private readonly IMapper _mapper;
     private readonly EmployeeService _service;
     private readonly Mock<ITenantProvider> _mockTenantProvider;
-    private readonly Mock<UserManager<User>> _mockUserManager;
-    private readonly Mock<RoleManager<IdentityRole>> _mockRoleManager;
+    private readonly Mock<IUserCreationService> _mockUserCreationService;
     private readonly ILogger<EmployeeService> _logger;
 
     public EmployeeServiceTests()
@@ -28,15 +26,7 @@ public class EmployeeServiceTests
         _mockTenantProvider = new Mock<ITenantProvider>();
         _mockTenantProvider.Setup(t => t.TenantId).Returns("default");
         
-        _mockUserManager = new Mock<UserManager<User>>(
-            Mock.Of<IUserStore<User>>(),
-            null!, null!, null!, null!, null!, null!, null!, null!
-        );
-        
-        _mockRoleManager = new Mock<RoleManager<IdentityRole>>(
-            Mock.Of<IRoleStore<IdentityRole>>(),
-            null!, null!, null!, null!
-        );
+        _mockUserCreationService = new Mock<IUserCreationService>();
         
         using var loggerFactory = LoggerFactory.Create(builder => builder.AddConsole());
         _logger = loggerFactory.CreateLogger<EmployeeService>();
@@ -51,7 +41,7 @@ public class EmployeeServiceTests
         
         var mockContext = new ApplicationDbContext(options, _mockTenantProvider.Object);
         
-        _service = new EmployeeService(_mockRepository.Object, _mapper, _mockTenantProvider.Object, _mockUserManager.Object, _mockRoleManager.Object, _logger, mockContext);
+        _service = new EmployeeService(_mockRepository.Object, _mapper, _mockTenantProvider.Object, _mockUserCreationService.Object, _logger, mockContext);
     }
 
     [Fact]
@@ -149,6 +139,90 @@ public class EmployeeServiceTests
         Assert.Equal("Bob", result.FirstName);
         Assert.Equal("Johnson", result.LastName);
         _mockRepository.Verify(r => r.AddAsync(It.IsAny<Employee>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task CreateEmployeeAsync_WithExistingUser_ShouldLinkAndNotCreateNewUser()
+    {
+        // Arrange
+        var createDto = new CreateEmployeeDto
+        {
+            EmployeeId = "EMP010",
+            FirstName = "Eve",
+            LastName = "Stone",
+            Email = "eve@example.com",
+            DateOfBirth = new DateTime(1992, 5, 10),
+            HireDate = DateTime.UtcNow,
+            Position = "Analyst",
+            Department = "Finance",
+            Salary = 60000
+        };
+
+        var linkedUser = new User { Id = "user-1", Email = createDto.Email };
+
+        _mockUserCreationService
+            .Setup(s => s.LinkExistingUserAsync(createDto.Email, createDto.EmployeeId))
+            .ReturnsAsync(linkedUser);
+
+        _mockUserCreationService
+            .Setup(s => s.CreateUserForEmployeeAsync(It.IsAny<CreateEmployeeDto>()))
+            .ReturnsAsync((User?)null);
+
+        _mockRepository
+            .Setup(r => r.AddAsync(It.IsAny<Employee>()))
+            .ReturnsAsync((Employee e) => e);
+
+        // Act
+        var result = await _service.CreateEmployeeAsync(createDto);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("EMP010", result.EmployeeId);
+        _mockUserCreationService.Verify(s => s.LinkExistingUserAsync(createDto.Email, createDto.EmployeeId), Times.Once);
+        _mockUserCreationService.Verify(s => s.CreateUserForEmployeeAsync(It.IsAny<CreateEmployeeDto>()), Times.Never);
+        _mockRepository.Verify(r => r.AddAsync(It.Is<Employee>(e => e.UserId == linkedUser.Id)), Times.Once);
+    }
+
+    [Fact]
+    public async Task CreateEmployeeAsync_WithNewUser_ShouldCreateUserAndLink()
+    {
+        // Arrange
+        var createDto = new CreateEmployeeDto
+        {
+            EmployeeId = "EMP011",
+            FirstName = "Sam",
+            LastName = "Green",
+            Email = "sam@example.com",
+            DateOfBirth = new DateTime(1993, 7, 15),
+            HireDate = DateTime.UtcNow,
+            Position = "Engineer",
+            Department = "Engineering",
+            Salary = 90000
+        };
+
+        var createdUser = new User { Id = "user-2", Email = createDto.Email };
+
+        _mockUserCreationService
+            .Setup(s => s.LinkExistingUserAsync(createDto.Email, createDto.EmployeeId))
+            .ReturnsAsync((User?)null);
+
+        _mockUserCreationService
+            .Setup(s => s.CreateUserForEmployeeAsync(createDto))
+            .ReturnsAsync(createdUser);
+
+        _mockRepository
+            .Setup(r => r.AddAsync(It.IsAny<Employee>()))
+            .ReturnsAsync((Employee e) => e);
+
+        // Act
+        var result = await _service.CreateEmployeeAsync(createDto);
+
+        // Assert
+        Assert.NotNull(result);
+        Assert.Equal("EMP011", result.EmployeeId);
+        _mockUserCreationService.Verify(s => s.LinkExistingUserAsync(createDto.Email, createDto.EmployeeId), Times.Once);
+        _mockUserCreationService.Verify(s => s.CreateUserForEmployeeAsync(createDto), Times.Once);
+        _mockRepository.Verify(r => r.AddAsync(It.Is<Employee>(e => e.UserId == createdUser.Id)), Times.Once);
     }
 
     [Fact]

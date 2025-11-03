@@ -27,26 +27,18 @@ export default function Login() {
   const onFinish = async (values: LoginRequest) => {
     setLoading(true);
     try {
-      console.log('🔐 Attempting login with:', values.email);
       const response = await authAPI.login(values);
-      console.log('✅ Login response:', response.data);
       
       // Tokens are stored in httpOnly cookies by backend
       // We only receive user data in the response
       const { user } = response.data;
-      console.log('👤 User data:', user);
-      console.log('🎯 User roles:', user.roles);
       
       // Login and fetch permissions (async)
-      console.log('📦 Storing session data and fetching permissions...');
       await login(user);
       
       notify.success('Login Successful', `Welcome back, ${user.firstName}!`);
-      console.log('🚀 Navigating to dashboard...');
       navigate('/dashboard');
     } catch (error: any) {
-      console.error('❌ Login error:', error);
-      console.error('❌ Error response:', error.response?.data);
       notify.error(
         'Login Failed',
         error.response?.data?.message || 'Please check your credentials and try again.'

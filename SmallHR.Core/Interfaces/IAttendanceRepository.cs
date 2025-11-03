@@ -13,4 +13,5 @@ public interface IAttendanceRepository : IGenericRepository<Attendance>
     Task<TimeSpan> GetOvertimeHoursAsync(int employeeId, DateTime startDate, DateTime endDate);
     Task<bool> HasClockInAsync(int employeeId, DateTime date);
     Task<bool> HasClockOutAsync(int employeeId, DateTime date);
+    Task<IEnumerable<Attendance>> GetAllAsync(string? tenantId = null);
 }

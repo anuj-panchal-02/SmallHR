@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SmallHR.API.Base;
+using SmallHR.API.Authorization;
 using SmallHR.Core.Entities;
 using SmallHR.Infrastructure.Data;
 
@@ -12,21 +14,19 @@ namespace SmallHR.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "SuperAdmin")]
-public class AdminController : ControllerBase
+[AuthorizeSuperAdmin]
+public class AdminController : BaseApiController
 {
     private readonly UserManager<User> _userManager;
     private readonly ApplicationDbContext _context;
-    private readonly ILogger<AdminController> _logger;
 
     public AdminController(
         UserManager<User> userManager,
         ApplicationDbContext context,
-        ILogger<AdminController> logger)
+        ILogger<AdminController> logger) : base(logger)
     {
         _userManager = userManager;
         _context = context;
-        _logger = logger;
     }
 
     /// <summary>
@@ -34,188 +34,183 @@ public class AdminController : ControllerBase
     /// This ensures SuperAdmin users operate at platform layer
     /// </summary>
     [HttpPost("fix-superadmin-tenantid")]
-    public async Task<IActionResult> FixSuperAdminTenantId()
+    public async Task<ActionResult<object>> FixSuperAdminTenantId()
     {
-        try
-        {
-            var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
-            if (superAdminRole == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "SuperAdmin role not found" });
-            }
-
-            // Get all users with SuperAdmin role
-            var superAdminUserIds = await _context.UserRoles
-                .Where(ur => ur.RoleId == superAdminRole.Id)
-                .Select(ur => ur.UserId)
-                .ToListAsync();
-
-            var superAdminUsers = await _userManager.Users
-                .Where(u => superAdminUserIds.Contains(u.Id))
-                .ToListAsync();
-
-            var updatedCount = 0;
-            var fixedUsers = new List<object>();
-
-            foreach (var user in superAdminUsers)
-            {
-                if (user.TenantId != null)
+                var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
+                if (superAdminRole == null)
                 {
-                    user.TenantId = null;
-                    var result = await _userManager.UpdateAsync(user);
-                    if (result.Succeeded)
+                    throw new KeyNotFoundException("SuperAdmin role not found");
+                }
+
+                // Get all users with SuperAdmin role
+                var superAdminUserIds = await _context.UserRoles
+                    .Where(ur => ur.RoleId == superAdminRole.Id)
+                    .Select(ur => ur.UserId)
+                    .ToListAsync();
+
+                var superAdminUsers = await _userManager.Users
+                    .Where(u => superAdminUserIds.Contains(u.Id))
+                    .ToListAsync();
+
+                var updatedCount = 0;
+                var fixedUsers = new List<object>();
+
+                foreach (var user in superAdminUsers)
+                {
+                    if (user.TenantId != null)
                     {
-                        updatedCount++;
-                        fixedUsers.Add(new
+                        var previousTenantId = user.TenantId;
+                        user.TenantId = null;
+                        var result = await _userManager.UpdateAsync(user);
+                        if (result.Succeeded)
                         {
-                            Email = user.Email,
-                            FirstName = user.FirstName,
-                            LastName = user.LastName,
-                            PreviousTenantId = user.TenantId ?? "null"
-                        });
-                        _logger.LogInformation("Fixed SuperAdmin user {Email} - set TenantId to NULL", user.Email);
-                    }
-                    else
-                    {
-                        _logger.LogWarning("Failed to update SuperAdmin user {Email}: {Errors}",
-                            user.Email, string.Join(", ", result.Errors.Select(e => e.Description)));
+                            updatedCount++;
+                            fixedUsers.Add(new
+                            {
+                                Email = user.Email,
+                                FirstName = user.FirstName,
+                                LastName = user.LastName,
+                                PreviousTenantId = previousTenantId ?? "null"
+                            });
+                            Logger.LogInformation("Fixed SuperAdmin user {Email} - set TenantId to NULL", user.Email);
+                        }
+                        else
+                        {
+                            Logger.LogWarning("Failed to update SuperAdmin user {Email}: {Errors}",
+                                user.Email, string.Join(", ", result.Errors.Select(e => e.Description)));
+                        }
                     }
                 }
-            }
 
-            return Ok(new
-            {
-                message = "SuperAdmin users fixed successfully",
-                updatedCount = updatedCount,
-                totalSuperAdmins = superAdminUsers.Count,
-                fixedUsers = fixedUsers
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error fixing SuperAdmin TenantId");
-            return StatusCode(500, new { message = "Error fixing SuperAdmin TenantId", error = ex.Message });
-        }
+                return new
+                {
+                    message = "SuperAdmin users fixed successfully",
+                    updatedCount = updatedCount,
+                    totalSuperAdmins = superAdminUsers.Count,
+                    fixedUsers = fixedUsers
+                };
+            },
+            "fixing SuperAdmin TenantId"
+        );
     }
 
     /// <summary>
     /// Get all SuperAdmin users and their TenantId status
     /// </summary>
     [HttpGet("superadmin-users")]
-    public async Task<IActionResult> GetSuperAdminUsers()
+    public async Task<ActionResult<object>> GetSuperAdminUsers()
     {
-        try
-        {
-            var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
-            if (superAdminRole == null)
+        return await HandleServiceResultAsync(
+            async () =>
             {
-                return NotFound(new { message = "SuperAdmin role not found" });
-            }
-
-            var superAdminUserIds = await _context.UserRoles
-                .Where(ur => ur.RoleId == superAdminRole.Id)
-                .Select(ur => ur.UserId)
-                .ToListAsync();
-
-            var superAdminUsers = await _userManager.Users
-                .Where(u => superAdminUserIds.Contains(u.Id))
-                .ToListAsync();
-
-            var users = new List<object>();
-            foreach (var user in superAdminUsers)
-            {
-                var roles = await _userManager.GetRolesAsync(user);
-                users.Add(new
+                var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
+                if (superAdminRole == null)
                 {
-                    Id = user.Id,
-                    Email = user.Email,
-                    FirstName = user.FirstName,
-                    LastName = user.LastName,
-                    TenantId = user.TenantId,
-                    IsCorrect = user.TenantId == null,
-                    Roles = roles,
-                    IsActive = user.IsActive
-                });
-            }
+                    throw new KeyNotFoundException("SuperAdmin role not found");
+                }
 
-            var needsFix = users.Count(u => ((dynamic)u).IsCorrect == false);
+                var superAdminUserIds = await _context.UserRoles
+                    .Where(ur => ur.RoleId == superAdminRole.Id)
+                    .Select(ur => ur.UserId)
+                    .ToListAsync();
 
-            return Ok(new
-            {
-                totalSuperAdmins = superAdminUsers.Count,
-                needsFix = needsFix,
-                users = users
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error getting SuperAdmin users");
-            return StatusCode(500, new { message = "Error getting SuperAdmin users", error = ex.Message });
-        }
+                var superAdminUsers = await _userManager.Users
+                    .Where(u => superAdminUserIds.Contains(u.Id))
+                    .ToListAsync();
+
+                var users = new List<object>();
+                foreach (var user in superAdminUsers)
+                {
+                    var roles = await _userManager.GetRolesAsync(user);
+                    users.Add(new
+                    {
+                        Id = user.Id,
+                        Email = user.Email,
+                        FirstName = user.FirstName,
+                        LastName = user.LastName,
+                        TenantId = user.TenantId,
+                        IsCorrect = user.TenantId == null,
+                        Roles = roles,
+                        IsActive = user.IsActive
+                    });
+                }
+
+                var needsFix = users.Count(u => ((dynamic)u).IsCorrect == false);
+
+                return new
+                {
+                    totalSuperAdmins = superAdminUsers.Count,
+                    needsFix = needsFix,
+                    users = users
+                };
+            },
+            "getting SuperAdmin users"
+        );
     }
 
     /// <summary>
     /// Verify SuperAdmin configuration
     /// </summary>
     [HttpGet("verify-superadmin")]
-    public async Task<IActionResult> VerifySuperAdmin()
+    public async Task<ActionResult<object>> VerifySuperAdmin()
     {
-        try
-        {
-            var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
-            if (superAdminRole == null)
+        return await HandleServiceResultAsync<object>(
+            async () =>
             {
-                return Ok(new
+                var superAdminRole = await _context.Roles.FirstOrDefaultAsync(r => r.Name == "SuperAdmin");
+                if (superAdminRole == null)
                 {
-                    isValid = false,
-                    issues = new[] { "SuperAdmin role not found" }
-                });
-            }
-
-            var superAdminUserIds = await _context.UserRoles
-                .Where(ur => ur.RoleId == superAdminRole.Id)
-                .Select(ur => ur.UserId)
-                .ToListAsync();
-
-            var superAdminUsers = await _userManager.Users
-                .Where(u => superAdminUserIds.Contains(u.Id))
-                .ToListAsync();
-
-            var issues = new List<string>();
-            var correctUsers = 0;
-
-            foreach (var user in superAdminUsers)
-            {
-                if (user.TenantId != null)
-                {
-                    issues.Add($"SuperAdmin user {user.Email} has TenantId = '{user.TenantId}' (should be NULL)");
+                    return new
+                    {
+                        isValid = false,
+                        issues = new[] { "SuperAdmin role not found" }
+                    };
                 }
-                else
+
+                var superAdminUserIds = await _context.UserRoles
+                    .Where(ur => ur.RoleId == superAdminRole.Id)
+                    .Select(ur => ur.UserId)
+                    .ToListAsync();
+
+                var superAdminUsers = await _userManager.Users
+                    .Where(u => superAdminUserIds.Contains(u.Id))
+                    .ToListAsync();
+
+                var issues = new List<string>();
+                var correctUsers = 0;
+
+                foreach (var user in superAdminUsers)
                 {
-                    correctUsers++;
+                    if (user.TenantId != null)
+                    {
+                        issues.Add($"SuperAdmin user {user.Email} has TenantId = '{user.TenantId}' (should be NULL)");
+                    }
+                    else
+                    {
+                        correctUsers++;
+                    }
                 }
-            }
 
-            if (superAdminUsers.Count == 0)
-            {
-                issues.Add("No SuperAdmin users found");
-            }
+                if (superAdminUsers.Count == 0)
+                {
+                    issues.Add("No SuperAdmin users found");
+                }
 
-            return Ok(new
-            {
-                isValid = issues.Count == 0,
-                superAdminRoleExists = superAdminRole != null,
-                totalSuperAdmins = superAdminUsers.Count,
-                correctConfiguration = correctUsers,
-                needsFix = superAdminUsers.Count - correctUsers,
-                issues = issues
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error verifying SuperAdmin configuration");
-            return StatusCode(500, new { message = "Error verifying SuperAdmin configuration", error = ex.Message });
-        }
+                return new
+                {
+                    isValid = issues.Count == 0,
+                    superAdminRoleExists = superAdminRole != null,
+                    totalSuperAdmins = superAdminUsers.Count,
+                    correctConfiguration = correctUsers,
+                    needsFix = superAdminUsers.Count - correctUsers,
+                    issues = issues
+                } as object;
+            },
+            "verifying SuperAdmin configuration"
+        );
     }
 }
 

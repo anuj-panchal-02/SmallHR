@@ -4,7 +4,7 @@ namespace SmallHR.Core.Interfaces;
 
 public interface IPositionService : IService
 {
-    Task<IEnumerable<PositionDto>> GetAllPositionsAsync();
+    Task<IEnumerable<PositionDto>> GetAllPositionsAsync(string? tenantId = null);
     Task<PositionDto?> GetPositionByIdAsync(int id);
     Task<IEnumerable<PositionDto>> GetPositionsByDepartmentIdAsync(int departmentId);
     Task<PositionDto> CreatePositionAsync(CreatePositionDto createPositionDto);

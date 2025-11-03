@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { getApiBase } from '../utils/api';
 import type {
   AuthResponse,
   LoginRequest,
@@ -21,7 +22,10 @@ import type {
   UpdatePositionRequest,
 } from '../types/api';
 
-const API_BASE_URL = 'http://localhost:5192/api';
+const API_BASE_URL = (() => {
+  const base = getApiBase();
+  return base ? `${base}/api` : '/api';
+})();
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -236,8 +240,8 @@ export const attendanceAPI = {
 
 // Department API
 export const departmentAPI = {
-  getAll: () =>
-    api.get<Department[]>('/departments'),
+  getAll: (tenantId?: string) =>
+    api.get<Department[]>('/departments', { params: tenantId ? { tenantId } : {} }),
   
   getById: (id: number) =>
     api.get<Department>(`/departments/${id}`),
@@ -263,8 +267,8 @@ export const departmentAPI = {
 
 // Position API
 export const positionAPI = {
-  getAll: () =>
-    api.get<Position[]>('/positions'),
+  getAll: (tenantId?: string) =>
+    api.get<Position[]>('/positions', { params: tenantId ? { tenantId } : {} }),
   
   getById: (id: number) =>
     api.get<Position>(`/positions/${id}`),

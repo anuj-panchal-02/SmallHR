@@ -8,5 +8,6 @@ public interface IPositionRepository : IGenericRepository<Position>
     Task<IEnumerable<Position>> GetByDepartmentIdAsync(int departmentId);
     Task<IEnumerable<Position>> GetActivePositionsAsync();
     Task<bool> TitleExistsAsync(string title);
+    Task<IEnumerable<Position>> GetAllAsync(string? tenantId = null);
 }
 
